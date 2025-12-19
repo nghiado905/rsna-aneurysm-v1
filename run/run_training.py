@@ -59,7 +59,13 @@ def get_trainer_from_args(dataset_name_or_id: Union[int, str],
 
     # initialize nnunet trainer
     preprocessed_dataset_folder_base = join(nnUNet_preprocessed, maybe_convert_to_dataset_name(dataset_name_or_id))
-    plans_file = join(preprocessed_dataset_folder_base, plans_identifier + '.json')
+
+    # allow plans_identifier to be a direct path to a json file (useful when running on Kaggle/input)
+    if isfile(plans_identifier):
+        plans_file = plans_identifier
+    else:
+        plans_file = join(preprocessed_dataset_folder_base, plans_identifier + '.json')
+
     plans = load_json(plans_file)
     dataset_json = load_json(join(preprocessed_dataset_folder_base, 'dataset.json'))
     nnunet_trainer = nnunet_trainer(plans=plans, configuration=configuration, fold=fold,
