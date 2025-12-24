@@ -423,6 +423,37 @@ class Kaggle2025RSNATrainer(nnUNetTrainer):
             self.print_to_log_file(line)
 
 
+        # palette used for fancy logging later on
+        self._ansi_palette = {
+            "reset": reset,
+            "bold": bold,
+            "cyan": cyan,
+            "magenta": magenta,
+            "yellow": yellow,
+            "green": green,
+            "red": _c("91"),
+            "blue": _c("94"),
+        }
+
+    def _style_log(self, text: str, color: str = "cyan", bold: bool = False) -> str:
+        palette = getattr(self, "_ansi_palette", {})
+        color_code = palette.get(color, "")
+        bold_code = palette.get("bold", "") if bold else ""
+        reset = palette.get("reset", "")
+        return f"{bold_code}{color_code}{text}{reset}"
+
+    def _log_step(self, tag: str, message: str, color: str = "cyan"):
+        tag_fmt = self._style_log(f"[{tag.upper()}]", color=color, bold=True)
+        self.print_to_log_file(f"{tag_fmt} {message}")
+
+    def _log_header(self, title: str, color: str = "magenta"):
+        bar = "=" * (len(title) + 8)
+        bar_fmt = self._style_log(bar, color=color, bold=True)
+        title_fmt = self._style_log(f"=== {title} ===", color=color, bold=True)
+        self.print_to_log_file(bar_fmt)
+        self.print_to_log_file(title_fmt)
+        self.print_to_log_file(bar_fmt)
+
     def _build_loss(self):
         loss = BCE_topK_loss_sep_channel(k=20)
         return loss
@@ -991,6 +1022,13 @@ class Kaggle2025RSNATrainer(nnUNetTrainer):
             self.inference_allowed_mirroring_axes,
         )
 
+        self._log_header("Validation Predictor", color="blue")
+        self._log_step(
+            "INIT",
+            f"tile_step=0.5 | gaussian=True | mirroring=True | device={self.device}",
+            color="cyan",
+        )
+
         with multiprocessing.get_context("spawn").Pool(
             default_num_processes
         ) as export_pool:
@@ -1020,9 +1058,16 @@ class Kaggle2025RSNATrainer(nnUNetTrainer):
 
             results = []
             csv_entries = []
+            total_cases = len(dataset_val.identifiers)
+            self._log_step(
+                "DATA",
+                f"{total_cases} validation cases | workers={default_num_processes} | fold={self.fold}",
+                color="yellow",
+            )
             for i, k in enumerate(
                 dataset_val.identifiers
             ):  # enumerate(['tomo_4c1ca8']): #
+                case_start = time()
                 proceed = not check_workers_alive_and_busy(
                     export_pool, worker_list, results, allowed_num_queued=2
                 )
@@ -1032,42 +1077,76 @@ class Kaggle2025RSNATrainer(nnUNetTrainer):
                         export_pool, worker_list, results, allowed_num_queued=2
                     )
 
-                self.print_to_log_file(f"predicting {k}")
+                case_idx = i + 1
+                self._log_step(
+                    "CASE",
+                    f"{case_idx:03d}/{total_cases:03d} -> predicting {k}",
+                    color="magenta",
+                )
                 data, _, seg_prev, properties = dataset_val.load_case(k)
 
                 # we do [:] to convert blosc2 to numpy
+                t_load = time()
                 data = data[:]
                 data = torch.from_numpy(data)
+                self._log_step(
+                    "LOAD",
+                    f"{k} data ready {tuple(data.shape)} in {np.round(time() - t_load, 2)}s",
+                    color="blue",
+                )
 
                 if self.is_cascaded:
                     raise NotImplementedError
 
-                self.print_to_log_file(
-                    f"{k}, shape {data.shape}, rank {self.local_rank}"
+                self._log_step(
+                    "SHAPE",
+                    f"{k}, tensor {tuple(data.shape)}, rank {self.local_rank}",
+                    color="yellow",
                 )
 
                 # predict logits
+                t_pred = time()
                 with torch.no_grad():
                     prediction = predictor.predict_sliding_window_return_logits(data)
                     empty_cache(self.device)
                     prediction = F.sigmoid(prediction).float()
                     empty_cache(self.device)
+                self._log_step(
+                    "PRED",
+                    f"{k} sliding-window logits -> probs in {np.round(time() - t_pred, 2)}s",
+                    color="green",
+                )
 
-                    # max value per C
-                    max_per_c = torch.amax(prediction, dim=(1, 2, 3))
+                # max value per C
+                max_per_c = torch.amax(prediction, dim=(1, 2, 3))
+                stats = ", ".join(
+                    [f"c{ci+1}:{v:.3f}" for ci, v in enumerate(max_per_c.tolist())]
+                )
+                self._log_step("STAT", f"{k} max per class | {stats}", color="cyan")
 
-                    csv_entries.append((k, *max_per_c.numpy()))
+                csv_entries.append((k, *max_per_c.numpy()))
 
-                    labels = list(self.dataset_json["labels"].keys())[1:] + [
-                        "Aneurysm Present"
-                    ]  # remove background
-                    # Add a column for "Aneurysm Present" based on whether any aneurysm is detected
-                    submission_df = pd.DataFrame(
-                        csv_entries, columns=["SeriesInstanceUID"] + labels
+                labels = list(self.dataset_json["labels"].keys())[1:] + [
+                    "Aneurysm Present"
+                ]  # remove background
+                # Add a column for "Aneurysm Present" based on whether any aneurysm is detected
+                submission_df = pd.DataFrame(
+                    csv_entries, columns=["SeriesInstanceUID"] + labels
+                )
+
+                if self.output_folder_base is not None:
+                    submission_df.to_csv(
+                        join(self.output_folder_base, f"val_{self.fold}.csv"),
+                        index=False,
+                    )
+                    self._log_step(
+                        "SAVE",
+                        f"val_{self.fold}.csv updated | rows={len(csv_entries)}",
+                        color="magenta",
                     )
 
-                    if self.output_folder_base is not None:
-                        submission_df.to_csv(
-                            join(self.output_folder_base, f"val_{self.fold}.csv"),
-                            index=False,
-                        )
+                self._log_step(
+                    "DONE",
+                    f"{k} completed in {np.round(time() - case_start, 2)}s",
+                    color="green",
+                )
