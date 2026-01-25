@@ -28,24 +28,16 @@ all_labels = [
 ]
 
 def load_and_crop(series_path: Path):
-    # Allow both DICOM folders and direct NIfTI files (for inference on preconverted data)
-    if series_path.is_file() and series_path.suffix.lower() in {".nii", ".gz", ".nii.gz"}:
-        image = sitk.ReadImage(str(series_path))
-    else:
-        image = process_series(series_path)
-
+    image = process_series(series_path)
     img = sitk.GetArrayFromImage(image)  # (Z, Y, X)
     bbox = get_bbox(img, np.flip(np.array(image.GetSpacing())))
 
     # apply the bounding box to the image and save it
     cropped_img = img[bbox[0] : bbox[1], bbox[2] : bbox[3], bbox[4] : bbox[5]]
     return cropped_img, {
-        "spacing": tuple(np.flip(np.array(image.GetSpacing()))),
-        "direction": tuple(image.GetDirection()),
-        "origin": tuple(image.GetOrigin()),
-        "original_size": tuple(img.shape),
-        "cropping_bbox": tuple(bbox),
-        "flipped_axes": tuple(),  # no flip applied in load_and_crop
+        "spacing": np.flip(np.array(image.GetSpacing())),
+        "direction": image.GetDirection(),
+        "origin": image.GetOrigin(),
     }
 
 
@@ -161,11 +153,6 @@ def process_series(input_folder: Path, n_jobs=-1) -> sitk.Image:
 
     # 1️⃣ List all DICOM files
     dicom_files = list(Path(input_folder).glob("*.dcm"))
-    if len(dicom_files) == 0:
-        raise FileNotFoundError(
-            f"No DICOM files found in '{input_folder}'. If you are providing NIfTI, "
-            f"pass the .nii/.nii.gz file path directly to load_and_crop."
-        )
 
     if len(dicom_files) > 1:
         metas = Parallel(n_jobs=n_jobs)(
@@ -487,11 +474,7 @@ def process_id(
             # Get row indexes
             series_df = loc_df[loc_df["SeriesInstanceUID"] == folder]
             # Obtain SOP instances (CAREFUL, ONLY COLUMN WITH "_NEW" TAG IS VALID!!)
-            # Handle both possible column names to avoid KeyError
-            if "SOPInstanceUID_new" in series_df.columns:
-                instances = series_df["SOPInstanceUID_new"].values.astype(str).tolist()
-            else:
-                instances = series_df["SOPInstanceUID"].values.astype(str).tolist()
+            instances = series_df["SOPInstanceUID"].values.astype(str).tolist()
             coordinates = series_df["coordinates"].apply(ast.literal_eval)
             locations = series_df["location"].values.astype(str).tolist()
 
@@ -512,6 +495,12 @@ def process_id(
                     axial_ind = get_id_from_instance(
                         folder=full_folder, target_instance=instance
                     )
+                    if axial_ind is None:
+                        print(
+                            f"⚠️ Skipping label in {folder}: SOPInstanceUID {instance} "
+                            f"not found (get_id_from_instance returned None)"
+                        )
+                        continue
                     center = [float(axial_ind), coordinate["y"], coordinate["x"]]
 
                 label_array = create_sphere(

@@ -1,7 +1,6 @@
-
-
 import argparse
 import ast
+import json
 from pathlib import Path
 import os
 import sys
@@ -11,128 +10,115 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import SimpleITK as sitk  # <--- Thêm thư viện đọc NIfTI
 
-from nnunetv2.dataset_conversion.kaggle_2025_rsna.official_data_to_nnunet import (
-    load_and_crop,
-)
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 
 # ==================================================================================
-# 1. PHẦN BỔ SUNG: HÀM VẼ MIP NÂNG CAO (3 GÓC + LẬT TRỤC CHUẨN)
+# 1. HÀM HELPER & VISUALIZATION
 # ==================================================================================
+
 def window_hu(vol, level=400.0, width=700.0):
-    """Windowing chuẩn CTA: Level 400, Width 700."""
+    """Windowing chuẩn cho mạch máu."""
     low = level - width / 2.0
     high = level + width / 2.0
     vol = np.clip(vol, low, high)
     vol = (vol - low) / (high - low)
     return vol
 
-def save_advanced_mip(volume, coords, label_name, prob, output_path):
+def save_heatmap_mip(volume, coords, label_name, prob, output_path):
     """
-    Vẽ MIP 3 góc nhìn chuẩn Radiological (Axial, Coronal, Sagittal).
-    Tự động lật trục để hiển thị đúng chiều giải phẫu (Đầu lên trên, Trước lên trên).
+    Vẽ MIP axial đơn giản.
     """
     try:
-        # 1. Windowing
-        vol_windowed = window_hu(volume, level=400.0, width=700.0)
-        
-        z_peak, y_peak, x_peak = coords
-        z_dim, y_dim, x_dim = vol_windowed.shape
-        slab = 15 
+        # Axial MIP (projection trục Z)
+        mip = volume.max(axis=0) if volume.ndim == 3 else volume
+        mip = (mip - mip.min()) / (mip.ptp() + 1e-8)
 
-        # --- CHUẨN BỊ 3 GÓC NHÌN ---
-        
-        # A. AXIAL (Nhìn từ trên xuống: Y dọc, X ngang)
-        z_start, z_end = max(0, int(z_peak - slab)), min(z_dim, int(z_peak + slab))
-        if z_end <= z_start: z_end = z_start + 1
-        mip_axial = np.max(vol_windowed[z_start:z_end, :, :], axis=0)
-        
-        # !!! FIX TRỤC Y (AXIAL): Lật ngược để Anterior lên trên !!!
-        mip_axial = np.flipud(mip_axial)
-        # Tọa độ vẽ Axial: X giữ nguyên, Y đảo ngược
-        pt_axial_x = x_peak
-        pt_axial_y = y_dim - 1 - y_peak
+        z_peak, y_peak, x_peak = map(int, coords)
+        h, w = mip.shape
 
-        # B. CORONAL (Nhìn từ trước: Z dọc, X ngang)
-        y_start, y_end = max(0, int(y_peak - slab)), min(y_dim, int(y_peak + slab))
-        if y_end <= y_start: y_end = y_start + 1
-        mip_coronal = np.max(vol_windowed[:, y_start:y_end, :], axis=1) 
-        
-        # !!! FIX TRỤC Z (CORONAL): Lật ngược để Head lên trên !!!
-        mip_coronal = np.flipud(mip_coronal) 
-        # Tọa độ vẽ Coronal: X giữ nguyên, Z đảo ngược
-        pt_cor_x = x_peak
-        pt_cor_y = z_dim - 1 - z_peak
+        fig, ax = plt.subplots(figsize=(8, 8), facecolor="black")
+        ax.imshow(mip, cmap="gray", origin="lower", vmin=0, vmax=1)
 
-        # C. SAGITTAL (Nhìn từ bên: Z dọc, Y ngang)
-        x_start, x_end = max(0, int(x_peak - slab)), min(x_dim, int(x_peak + slab))
-        if x_end <= x_start: x_end = x_start + 1
-        mip_sagittal = np.max(vol_windowed[:, :, x_start:x_end], axis=2)
-        
-        # !!! FIX TRỤC Z (SAGITTAL): Lật ngược để Head lên trên !!!
-        mip_sagittal = np.flipud(mip_sagittal)
-        # Tọa độ vẽ Sagittal: Y giữ nguyên, Z đảo ngược
-        pt_sag_x = y_peak
-        pt_sag_y = z_dim - 1 - z_peak
+        # Blob heatmap quanh peak
+        yy, xx = np.ogrid[:h, :w]
+        dist_sq = (xx - x_peak) ** 2 + (yy - y_peak) ** 2
+        blob = np.exp(-dist_sq / (2 * 12**2))
+        blob /= blob.max() + 1e-8
+        ax.imshow(blob, cmap="hot", alpha=blob * 0.75, origin="lower")
 
-        # --- HÀM VẼ HEATMAP BLOB ---
-        def plot_blob_overlay(ax, img, point_x, point_y, title):
-            # origin='lower' kết hợp với np.flipud sẽ hiển thị đúng chiều
-            ax.imshow(img, cmap="gray", origin="lower", vmin=0, vmax=1)
-            
-            if point_x is not None and point_y is not None:
-                # Vẽ điểm tâm (Đỏ đậm)
-                ax.scatter(point_x, point_y, c="red", s=100, edgecolors="white", linewidth=1.5, zorder=5)
-                
-                # Vẽ Heatmap tỏa nhiệt (Gaussian Blob)
-                h, w = img.shape
-                yy, xx = np.ogrid[:h, :w]
-                dist_sq = (xx - point_x)**2 + (yy - point_y)**2
-                blob = np.exp(-dist_sq / (2 * 12**2))
-                blob /= (blob.max() + 1e-8)
-                ax.imshow(blob, cmap="hot", alpha=blob * 0.6, origin="lower")
-
-            ax.set_title(title, color='white', fontsize=12, fontweight='bold')
-            ax.axis('off')
-
-        # --- PLOT ---
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6), facecolor='black')
-        fig.suptitle(f"{label_name} | Prob: {prob:.4f}", color='#00FF00', fontsize=16, fontweight='bold', y=0.98)
-
-        # Plot 1: Axial (Đã lật Y)
-        plot_blob_overlay(axes[0], mip_axial, pt_axial_x, pt_axial_y, f"Axial (Z={z_peak})")
-        
-        # Plot 2: Coronal (Đã lật Z)
-        plot_blob_overlay(axes[1], mip_coronal, pt_cor_x, pt_cor_y, f"Coronal (Y={y_peak})")
-        
-        # Plot 3: Sagittal (Đã lật Z)
-        plot_blob_overlay(axes[2], mip_sagittal, pt_sag_x, pt_sag_y, f"Sagittal (X={x_peak})")
+        ax.scatter(x_peak, y_peak, c="red", s=180, edgecolors="white", linewidth=2.5, zorder=5)
+        ax.set_title(f"{label_name} | p={prob:.4f} | z={z_peak}", color="white", fontsize=14, pad=10)
+        ax.axis("off")
 
         plt.tight_layout()
-        plt.savefig(output_path, dpi=120, bbox_inches='tight', facecolor='black')
+        plt.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="#111111")
         plt.close(fig)
 
     except Exception as e:
-        print(f"⚠️ Lỗi vẽ MIP: {e}")
+        print(f"⚠️ Lỗi vẽ Heatmap: {e}")
+
+def load_nifti_simple(nifti_path):
+    """
+    Đọc file .nii/.nii.gz và trả về array + properties cho nnU-Net.
+    """
+    # Đọc ảnh bằng SimpleITK
+    img_itk = sitk.ReadImage(str(nifti_path))
+    
+    # SimpleITK trả về (X, Y, Z), convert sang numpy (Z, Y, X)
+    img_npy = sitk.GetArrayFromImage(img_itk).astype(np.float32)
+    
+    # Lấy spacing (X, Y, Z) và đảo ngược thành (Z, Y, X)
+    spacing = np.array(img_itk.GetSpacing())[::-1]
+    
+    properties = {
+        "sitk_stuff": None,
+        "spacing": spacing,
+        "shape_before_cropping": img_npy.shape,
+        "bbox_used_for_cropping": None 
+    }
+    
+    return img_npy, properties
+
+def get_clean_id(filename):
+    """
+    Làm sạch tên file để khớp với value trong json.
+    Ví dụ: 'iarsna_0001_0000.nii.gz' -> 'iarsna_0001'
+    """
+    name = filename
+    if name.endswith(".nii.gz"):
+        name = name[:-7]
+    elif name.endswith(".nii"):
+        name = name[:-4]
+        
+    # Bỏ suffix channel của nnU-Net (_0000)
+    if name.endswith("_0000"):
+        name = name[:-5]
+        
+    return name
 
 # ==================================================================================
-# 2. CODE CHÍNH (LOGIC INFERENCE GIỮ NGUYÊN)
+# 2. CODE CHÍNH
 # ==================================================================================
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("-i", "--input-dir", type=Path, required=True, help="Path to directory with all DICOM data")
-    p.add_argument("-o", "--output-path", type=Path, required=True, help="Where to store the resulting csv")
-    p.add_argument("-m", "--model_folder", type=Path, required=True, help="Path to model checkpoint")
-    p.add_argument("-c", "--chk", type=str, required=True, help="Name of the checkpoint")
-    p.add_argument("--fold", type=ast.literal_eval, help="tuple of fold identifiers")
-    p.add_argument("--step_size", type=float, required=False, default=0.5, help="Step size for sliding window prediction")
-    p.add_argument("--disable_tta", action="store_true", required=False, default=False, help="Disable test time data augmentation")
-    p.add_argument("--use_gaussian", action="store_true", required=False, default=False, help="Apply gaussian weighting")
-    p.add_argument("--device", type=str, default="cuda", required=False, help="Device (cuda/cpu)")
-    # Thêm tham số ngưỡng vẽ
+    p.add_argument("-i", "--input-dir", type=Path, required=True, help="Input directory (.nii files)")
+    p.add_argument("-o", "--output-path", type=Path, required=True, help="Output CSV path")
+    p.add_argument("-m", "--model_folder", type=Path, required=True, help="Model folder")
+    p.add_argument("-c", "--chk", type=str, required=True, help="Checkpoint name")
+    p.add_argument("--fold", type=ast.literal_eval, help="Fold tuple")
+    p.add_argument("--mapping_json", type=Path, required=True, help="Path to ids_mapping.json")
+    
+    p.add_argument("--step_size", type=float, default=0.5)
+    p.add_argument("--disable_tta", action="store_true", default=False)
+    p.add_argument("--use_gaussian", action="store_true", default=False)
+    p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--viz_threshold", type=float, default=0.2, help="Threshold to save MIP")
+    
+    # Whitelist filters (nếu cần lọc, truyền path csv vào đây)
+    p.add_argument("--whitelist-csv", type=Path, required=False)
 
     return p.parse_args()
 
@@ -140,20 +126,28 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # --- SETUP FOLDER ẢNH MIP ---
+    # 1. Load Mapping JSON (SeriesUID <-> ShortID)
+    print(f"Dataset mapping: Loading from {args.mapping_json}...")
+    with open(args.mapping_json, 'r') as f:
+        mapping_data = json.load(f)
+    
+    # Tạo dict ngược: { "iarsna_0001": "1.2.826..." }
+    short_to_long_id = {v: k for k, v in mapping_data.items()}
+    print(f"-> Loaded {len(short_to_long_id)} mapping entries.")
+
+    # 2. Setup Output Folders
     args.output_path.parent.mkdir(parents=True, exist_ok=True)
-    mip_dir = args.output_path.parent / (args.output_path.stem + "_mips")
+    mip_dir = args.output_path.parent / (args.output_path.stem + "_heatmap_mips")
     mip_dir.mkdir(exist_ok=True, parents=True)
 
+    # 3. Init Model
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     predictor = nnUNetPredictor(
         tile_step_size=args.step_size,
         use_gaussian=args.use_gaussian,
         use_mirroring=not args.disable_tta,
         device=device,
-        verbose=False,
-        verbose_preprocessing=False,
-        allow_tqdm=False,
+        verbose=False, verbose_preprocessing=False, allow_tqdm=False,
     )
     predictor.initialize_from_trained_model_folder(
         args.model_folder,
@@ -162,101 +156,113 @@ def main():
     )
 
     preprocessor = predictor.configuration_manager.preprocessor_class()
-
-    # Label setup
     labels_dict = predictor.dataset_json["labels"]
     labels = ["SeriesInstanceUID"] + list(labels_dict.keys())[1:] + ["Aneurysm Present"]
-    idx_to_label = {v: k for k, v in labels_dict.items() if v != 0} # Map cho vẽ ảnh
+    idx_to_label = {v: k for k, v in labels_dict.items() if v != 0}
 
-    # === 1. LOGIC WHITELIST (THEO YÊU CẦU) ===
-    series_list = list(args.input_dir.iterdir())
-    submission_path = Path(r"D:\VietRAD\kaggle-rsna-intracranial-aneurysm-detection-2025-solution\analysis_results\ground_truth_coordinates.csv")
-    if submission_path.exists():
-        try:
-            print(f"-> Đọc whitelist từ: {submission_path}")
-            df_sub = pd.read_csv(submission_path)
-            allowed_ids = set(df_sub["SeriesInstanceUID"].astype(str).str.strip())
-            # Lọc list
-            original_len = len(series_list)
-            series_list = [s for s in series_list if s.name in allowed_ids]
-            print(f"-> Đã lọc: {original_len} -> {len(series_list)} ca cần xử lý.")
-        except Exception as e:
-            print(f"⚠️ Lỗi khi đọc {submission_path}: {e}")
-            
-    # === 2. LOGIC RESUME & INIT FILE ===
-    processed_ids = set()
+    # 4. Get List of NIfTI Files
+    all_files = sorted(list(args.input_dir.iterdir()))
+    series_list = [f for f in all_files if f.name.endswith(('.nii', '.nii.gz'))]
+    
+    if len(series_list) == 0:
+        print(f"⚠️ Không tìm thấy file .nii/.nii.gz nào trong {args.input_dir}")
+        return
+
+    # 5. Whitelist Logic (Optional)
+    # Nếu có whitelist, chỉ chạy những UID nằm trong whitelist
+    if args.whitelist_csv and args.whitelist_csv.exists():
+        print(f"-> Filtering using whitelist: {args.whitelist_csv}")
+        df_white = pd.read_csv(args.whitelist_csv)
+        allowed_series_uids = set(df_white["SeriesInstanceUID"].astype(str).str.strip())
+        
+        filtered_list = []
+        for f in series_list:
+            short_id = get_clean_id(f.name)
+            series_uid = short_to_long_id.get(short_id)
+            if series_uid and series_uid in allowed_series_uids:
+                filtered_list.append(f)
+        
+        print(f"-> Filtered: {len(series_list)} -> {len(filtered_list)} cases.")
+        series_list = filtered_list
+
+    # 6. Resume Logic
+    processed_uids = set()
     if args.output_path.exists():
         try:
             df_done = pd.read_csv(args.output_path)
-            if "SeriesInstanceUID" in df_done.columns:
-                processed_ids = set(df_done["SeriesInstanceUID"].astype(str))
-            print(f"-> Đã có {len(processed_ids)} ca xong. Sẽ bỏ qua.")
+            processed_uids = set(df_done["SeriesInstanceUID"].astype(str))
         except: pass
     else:
-        # Ghi header lần đầu
         pd.DataFrame(columns=labels).to_csv(args.output_path, index=False)
 
-    print(f"🚀 Bắt đầu Inference...")
+    print(f"🚀 Bắt đầu Inference... (Ảnh lưu tại {mip_dir})")
 
-    # === 3. VÒNG LẶP CHÍNH (LOGIC CŨ + BỔ SUNG VẼ) ===
-    for series_dir in tqdm(series_list):
-        if series_dir.name in processed_ids:
+    # =========================================================================
+    # INFERENCE LOOP
+    # =========================================================================
+    for nifti_path in tqdm(series_list):
+        # Lấy short ID từ tên file (vd: iarsna_0001)
+        short_id = get_clean_id(nifti_path.name)
+        
+        # Mapping sang Long ID (SeriesInstanceUID)
+        series_uid = short_to_long_id.get(short_id)
+        
+        if not series_uid:
+            print(f"⚠️ Warning: Không tìm thấy mapping cho file {nifti_path.name}. Bỏ qua.")
+            continue
+
+        if series_uid in processed_uids:
             continue
 
         try:
-            # -------- START: LOGIC INFERENCE CHUẨN (KHÔNG ĐỔI) --------
-            img, properties = load_and_crop(series_dir)
-            img = np.flip(img, 1) # Flip chuẩn
+            # 1. Load NIfTI (Thay vì load_and_crop)
+            img, properties = load_nifti_simple(nifti_path)
             
+            # 2. Add channel dimension: (Z, Y, X) -> (1, Z, Y, X)
+            input_data = img[np.newaxis, ...]
+
+            # 3. Predict
+            # data: là ảnh sau khi resample/normalize (dùng để vẽ heatmap cho khớp)
             data, _, _ = preprocessor.run_case_npy(
-                np.array([img]),
-                None,
-                properties,
-                predictor.plans_manager,
-                predictor.configuration_manager,
-                predictor.dataset_json,
+                input_data, None, properties,
+                predictor.plans_manager, predictor.configuration_manager, predictor.dataset_json,
             )
+            
             logits = predictor.predict_logits_from_preprocessed_data(
                 torch.from_numpy(data)
             ).cpu()
             probs = torch.sigmoid(logits)
 
-            max_per_c = torch.amax(probs, dim=(1, 2, 3)).to(
-                dtype=torch.float32, device="cpu"
-            )
-            # -------- END: LOGIC INFERENCE CHUẨN --------
-
-            # === 4. LƯU CSV NGAY LẬP TỨC (APPEND MODE) ===
-            res_row = [series_dir.name] + max_per_c.numpy().tolist()
+            # 4. Max pooling & Save CSV
+            # Lưu ý: res_row dùng series_uid (Long ID)
+            max_per_c = torch.amax(probs, dim=(1, 2, 3)).to(dtype=torch.float32, device="cpu")
+            res_row = [series_uid] + max_per_c.numpy().tolist()
             pd.DataFrame([res_row], columns=labels).to_csv(args.output_path, mode='a', header=False, index=False)
 
-            # === 5. TÍNH TOÁN & VẼ ẢNH MIP (BỔ SUNG) ===
-            # Phần này chỉ chạy để vẽ ảnh, không ảnh hưởng kết quả CSV
-            fg_probs = max_per_c.numpy()[1:] # Bỏ background
-            best_prob = np.max(fg_probs)
+            # 5. Visualization (Heatmap)
+            fg_probs = max_per_c.numpy()[1:] # Bỏ bg
+            best_prob = np.max(fg_probs) if len(fg_probs) > 0 else 0
 
             if best_prob > args.viz_threshold:
-                # Tìm tọa độ điểm max để vẽ
-                best_cls_idx = np.argmax(fg_probs) + 1 # +1 do bỏ bg
-                best_label_name = idx_to_label.get(best_cls_idx, "Unknown")
+                best_cls_idx = np.argmax(fg_probs) + 1
+                label_name = idx_to_label.get(best_cls_idx, "Unknown")
                 
-                # Lấy bản đồ xác suất của class đó
                 prob_map = probs[best_cls_idx]
-                peak_idx_flat = torch.argmax(prob_map).item()
-                z, y, x = np.unravel_index(peak_idx_flat, prob_map.shape)
+                peak_idx = torch.argmax(prob_map).item()
+                z, y, x = np.unravel_index(peak_idx, prob_map.shape)
                 
-                # Vẽ ảnh MIP 3 góc xịn sò
-                safe_name = best_label_name.replace(" ", "_").replace("/", "-")
-                png_name = f"{series_dir.name}_{safe_name}_p{best_prob:.2f}.png"
+                # Tên file ảnh output dùng SeriesUID để dễ trace
+                safe_name = label_name.replace(" ", "_").replace("/", "-")
+                png_name = f"{series_uid}_{safe_name}_p{best_prob:.2f}.png"
                 
-                # Gọi hàm vẽ (truyền img đã flip để khớp tọa độ)
-                save_advanced_mip(img, (z, y, x), best_label_name, best_prob, mip_dir / png_name)
+                # Vẽ lên data[0] (ảnh đã preprocess) để khớp tọa độ heatmap
+                save_heatmap_mip(data[0], (z, y, x), label_name, best_prob, mip_dir / png_name)
 
         except Exception as e:
-            print(f"❌ Lỗi ca {series_dir.name}: {e}")
+            print(f"❌ Lỗi xử lý {nifti_path.name}: {e}")
             continue
 
-    print(f"Results saved to {args.output_path}")
+    print(f"✅ Hoàn tất! Kết quả lưu tại: {args.output_path}")
 
 
 if __name__ == "__main__":
