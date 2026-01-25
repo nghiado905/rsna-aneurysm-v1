@@ -14,6 +14,7 @@ import pandas as pd
 import torch
 import SimpleITK as sitk
 from tqdm import tqdm
+import importlib
 
 # ==============================================================================
 # 1. CẤU HÌNH ĐƯỜNG DẪN (có thể override qua CLI)
@@ -24,6 +25,17 @@ DEFAULT_SEG_CHK_POINT = "checkpoint_final.pth"
 DEFAULT_SEG_FOLD = "4"
 DEFAULT_OVERLAY_BOOST_VAL = 200
 DEFAULT_CUSTOM_TEMP_DIR = Path(r"E:\temp")
+
+# Bảo đảm custom trainer Kaggle2025RSNATrainer có trên PYTHONPATH
+REPO_ROOT = Path(__file__).resolve().parents[3]  # repo gốc
+for p in (REPO_ROOT, REPO_ROOT / "nnunetv2"):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+# Import module trainer để nnUNetPredictor có thể tìm thấy
+try:
+    importlib.import_module("nnunetv2.training.nnUNetTrainer.project_specific.kaggle2025_rsna.Kaggle2025RSNATrainer")
+except Exception as e:
+    logging.getLogger("RSNA_Pipeline").warning(f"⚠️ Không thể import Kaggle2025RSNATrainer: {e}")
 
 # ==============================================================================
 # 2. HỆ THỐNG LOGGING
