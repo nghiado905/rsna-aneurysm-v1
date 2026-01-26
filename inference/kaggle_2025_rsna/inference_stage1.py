@@ -57,8 +57,10 @@ def run_vessel_segmentation(input_nii: Path, output_dir: Path,
 
     env = os.environ.copy()
     env["nnUNet_results"] = seg_model_root
-    env["nnUNet_raw"] = str(input_nii.parent)
+    env["nnUNet_raw"] = str(input_nii.parent) 
     env["nnUNet_preprocessed"] = str(input_nii.parent)
+    # Disable multiprocessing export on Windows to avoid WinError 87 pipe issues
+    env["nnUNet_n_proc_segmentation_export"] = "1"
 
     cmd = [
         "nnUNetv2_predict",
