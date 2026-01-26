@@ -1,161 +1,228 @@
 import argparse
-import ast
-import subprocess
 import tempfile
 import sys
 import os
 import shutil
+import logging
 from pathlib import Path
-
 import numpy as np
 import SimpleITK as sitk
 from tqdm import tqdm
+import torch
+import torch.nn.functional as F
 
-"""
-Stage 1: DICOM/.nii -> Segment CoW -> Overlay -> Lưu NIfTI overlay
-Usage:
-python inference_stage1.py \
-  -i /path/to/series_or_nii \
-  -o /path/to/overlay_out_dir \
-  --seg-model-root /path/to/nnUNet_results_seg \
-  --seg-dataset Dataset113_CTMulSegWholeData \
-  --seg-chk checkpoint_final.pth \
-  --seg-fold 4 \
-  --overlay-boost 200 \
-  --temp-dir /tmp
-"""
-
-# ---------------- Defaults (có thể override qua CLI) ---------------- #
+# ================= CẤU HÌNH MẶC ĐỊNH =================
 DEFAULT_SEG_MODEL_ROOT = r"D:\VietRAD\kaggle-rsna-intracranial-aneurysm-detection-2025-solution\TopCoWSubmissions\nnUNet\model"
-DEFAULT_SEG_DATASET = "Dataset113_CTMulSegWholeData"
 DEFAULT_SEG_CHK = "checkpoint_final.pth"
 DEFAULT_SEG_FOLD = "4"
 DEFAULT_OVERLAY_BOOST = 200
-DEFAULT_TEMP_DIR = Path(r"E:\temp")
+DEFAULT_TEMP_DIR = Path(r"E:\temp_stage1")
 
-# -------------------------------------------------------------------- #
+# ================= IMPORT NNUNET =================
+try:
+    from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+except ImportError:
+    print("❌ Thiếu thư viện nnunetv2.")
+    sys.exit(1)
 
-def convert_dicom_to_nifti(dicom_dir: Path, out_path: Path):
+# ================= LOGGING =================
+def setup_logger():
+    logger = logging.getLogger("Stage1_Direct")
+    logger.setLevel(logging.INFO)
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s', datefmt='%H:%M:%S'))
+    logger.addHandler(handler)
+    return logger
+
+logger = setup_logger()
+
+# ================= HÀM XỬ LÝ =================
+
+def convert_dicom_to_nifti(dicom_dir, out_path):
+    """Convert DICOM sang NIfTI"""
     reader = sitk.ImageSeriesReader()
     dicom_names = reader.GetGDCMSeriesFileNames(str(dicom_dir))
     if not dicom_names:
-        raise ValueError(f"Không thấy DICOM trong {dicom_dir}")
+        raise ValueError(f"Không tìm thấy DICOM trong {dicom_dir}")
     reader.SetFileNames(dicom_names)
     image = reader.Execute()
     sitk.WriteImage(image, str(out_path))
-    return image
 
+def run_vessel_segmentation_direct(input_nii_path, predictor):
+    """
+    Dùng nnUNetPredictor trực tiếp + Fix lỗi lệch size (Resample back).
+    """
+    # 1. Đọc ảnh Input
+    img_itk = sitk.ReadImage(str(input_nii_path))
+    img_npy = sitk.GetArrayFromImage(img_itk).astype(np.float32) # Shape: (Z, Y, X)
+    spacing = np.array(img_itk.GetSpacing())[::-1]               # Shape: (Z, Y, X)
+    
+    original_shape = img_npy.shape # Lưu shape gốc (ví dụ: 276, 512, 512)
 
-def run_vessel_segmentation(input_nii: Path, output_dir: Path,
-                            seg_model_root: str, seg_dataset: str,
-                            seg_chk: str, seg_fold: str, seg_device: str = "cuda"):
-    case_id = input_nii.name.replace(".nii.gz", "").replace(".nii", "")
-    temp_input_dir = input_nii.parent / "nnunet_seg_input"
-    temp_input_dir.mkdir(exist_ok=True)
-    target_input_name = f"{case_id}_0000.nii.gz"
-    shutil.copy(input_nii, temp_input_dir / target_input_name)
+    # 2. Chuẩn bị Properties
+    props = {
+        'spacing': spacing,
+        'sitk_stuff': None,
+        'shape_before_cropping': original_shape 
+    }
+    
+    # 3. Predict (nnU-Net sẽ tự resize ảnh input theo plans)
+    # input_data: (1, Z, Y, X)
+    input_data = img_npy[np.newaxis, ...] 
 
-    env = os.environ.copy()
-    env["nnUNet_results"] = seg_model_root
-    env["nnUNet_raw"] = str(input_nii.parent) 
-    env["nnUNet_preprocessed"] = str(input_nii.parent)
-    # Disable multiprocessing export on Windows to avoid WinError 87 pipe issues
-    env["nnUNet_n_proc_segmentation_export"] = "1"
+    # Chạy Preprocessing
+    preproc = predictor.configuration_manager.preprocessor_class()
+    data, _, _ = preproc.run_case_npy(
+        input_data, None, props,
+        predictor.plans_manager,
+        predictor.configuration_manager,
+        predictor.dataset_json,
+    )
+    
+    # Chạy Prediction -> logits shape: (NumClasses, Z_new, Y_new, X_new)
+    # Ví dụ output shape: (2, 184, 638, 638) - Đã bị resize
+    logits = predictor.predict_logits_from_preprocessed_data(torch.from_numpy(data))
+    
+    # Lấy nhãn (Argmax) -> Shape: (Z_new, Y_new, X_new)
+    prediction_tensor = torch.argmax(logits, dim=0)
 
-    cmd = [
-        "nnUNetv2_predict",
-        "-d", seg_dataset,
-        "-i", str(temp_input_dir),
-        "-o", str(output_dir),
-        "-f", seg_fold,
-        "-tr", "nnUNetTrainer",
-        "-c", "3d_fullres",
-        "-p", "nnUNetPlans",
-        "-chk", seg_chk,
-        "--disable_tta",
-        "-device", seg_device,
-    ]
+    # 4. [QUAN TRỌNG] Resize Mask về kích thước gốc
+    # Nếu shape hiện tại khác shape gốc thì phải resize ngược lại
+    if prediction_tensor.shape != original_shape:
+        # logger.info(f"   -> Resizing mask from {prediction_tensor.shape} back to {original_shape}")
+        
+        # Input cho interpolate phải là 5D: (Batch, Channel, D, H, W)
+        # prediction_tensor: (D, H, W) -> unsqueeze(0).unsqueeze(0)
+        pred_input = prediction_tensor.unsqueeze(0).unsqueeze(0).float()
+        
+        # Interpolate Nearest (Cho Mask)
+        pred_resized = F.interpolate(
+            pred_input, 
+            size=original_shape, 
+            mode='nearest'
+        )
+        
+        # Bỏ batch/channel dim -> Về lại (D, H, W) = (Z, Y, X)
+        prediction = pred_resized[0, 0].byte().cpu().numpy()
+    else:
+        prediction = prediction_tensor.byte().cpu().numpy()
+
+    # 5. Đóng gói thành SimpleITK Image
+    pred_itk = sitk.GetImageFromArray(prediction)
+    # Bây giờ size đã khớp, lệnh này sẽ không lỗi nữa
+    pred_itk.CopyInformation(img_itk)
+    
+    return pred_itk
+
+def apply_overlay_and_save(img_path, mask_itk, save_path, boost_val):
+    """
+    Overlay -> Save NIfTI mới
+    """
+    img_itk = sitk.ReadImage(str(img_path))
+    img_arr = sitk.GetArrayFromImage(img_itk)
+    
+    mask_arr = sitk.GetArrayFromImage(mask_itk)
+    
+    # Kiểm tra lần cuối
+    if img_arr.shape == mask_arr.shape:
+        mask_binary = mask_arr > 0
+        if np.sum(mask_binary) > 0:
+            img_arr = img_arr.astype(np.float32)
+            img_arr[mask_binary] += boost_val
+            img_arr = np.clip(img_arr, -1024, 3000)
+    else:
+        logger.warning(f"⚠️ Vẫn lệch size: Img {img_arr.shape} vs Mask {mask_arr.shape}. Saving original.")
+
+    # Lưu file
+    new_img_itk = sitk.GetImageFromArray(img_arr)
+    new_img_itk.CopyInformation(img_itk)
+    sitk.WriteImage(new_img_itk, str(save_path))
+
+def process_case(input_path, output_dir, temp_root, predictor, boost_val):
+    uid = input_path.name.replace(".nii.gz", "").replace(".nii", "")
+    
+    # Resume check
+    final_out_path = output_dir / f"{uid}.nii.gz"
+    if final_out_path.exists():
+        return
+
+    # Temp setup
+    case_temp = temp_root / uid
+    case_temp.mkdir(exist_ok=True)
+    raw_nii = case_temp / f"{uid}.nii.gz"
+
     try:
-        subprocess.run(cmd, check=True, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError as e:
-        # In case of failure, print stderr for debugging then re-raise
-        err = e.stderr.decode(errors="ignore") if e.stderr else ""
-        print(f"\n❌ nnUNetv2_predict failed for {input_nii.name}:\n{err}")
-        raise
-    expected_mask = output_dir / f"{case_id}.nii.gz"
-    shutil.rmtree(temp_input_dir, ignore_errors=True)
-    if not expected_mask.exists():
-        raise FileNotFoundError(f"Không thấy mask: {expected_mask}")
-    return expected_mask
-
-
-def apply_overlay(img_nii: Path, mask_nii: Path, boost: int):
-    img_itk = sitk.ReadImage(str(img_nii))
-    img = sitk.GetArrayFromImage(img_itk).astype(np.float32)
-    spacing = np.array(img_itk.GetSpacing())[::-1]
-
-    mask = sitk.GetArrayFromImage(sitk.ReadImage(str(mask_nii)))
-    if mask.shape == img.shape and (mask > 0).any():
-        img[mask > 0] = np.clip(img[mask > 0] + boost, -1024, 3000)
-    return img, spacing, img_itk.GetOrigin(), img_itk.GetDirection()
-
-
-def save_overlay(arr, spacing, origin, direction, out_path: Path):
-    img = sitk.GetImageFromArray(arr.astype(np.float32))
-    img.SetSpacing(tuple(spacing[::-1]))
-    img.SetOrigin(origin)
-    img.SetDirection(direction)
-    sitk.WriteImage(img, str(out_path))
-
-
-def prepare_targets(input_path: Path):
-    if input_path.is_file():
-        return [input_path]
-    if list(input_path.glob("*.dcm")):
-        return [input_path]
-    return sorted([d for d in input_path.iterdir() if d.is_dir()])
-
+        if input_path.is_dir():
+            convert_dicom_to_nifti(input_path, raw_nii)
+        else:
+            shutil.copy(input_path, raw_nii)
+            
+        # Segment (có tự động resize back)
+        mask_itk = run_vessel_segmentation_direct(raw_nii, predictor)
+        
+        # Overlay & Save
+        apply_overlay_and_save(raw_nii, mask_itk, final_out_path, boost_val)
+        
+    except Exception as e:
+        logger.error(f"❌ Error {uid}: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    try: shutil.rmtree(case_temp)
+    except: pass
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("-i", "--input", type=Path, required=True)
-    ap.add_argument("-o", "--output-dir", type=Path, required=True, help="Thư mục lưu overlay NIfTI")
-    ap.add_argument("--seg-model-root", type=Path, default=Path(DEFAULT_SEG_MODEL_ROOT))
-    ap.add_argument("--seg-dataset", type=str, default=DEFAULT_SEG_DATASET)
-    ap.add_argument("--seg-chk", type=str, default=DEFAULT_SEG_CHK)
-    ap.add_argument("--seg-fold", type=str, default=DEFAULT_SEG_FOLD)
-    ap.add_argument("--seg-device", type=str, default="cuda", help="Thiết bị chạy nnUNetv2_predict (cuda/cpu)")
-    ap.add_argument("--overlay-boost", type=int, default=DEFAULT_OVERLAY_BOOST)
-    ap.add_argument("--temp-dir", type=Path, default=DEFAULT_TEMP_DIR)
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-i", "--input", required=True, type=Path, help="Folder DICOM hoặc NIfTI gốc")
+    parser.add_argument("-o", "--output-dir", required=True, type=Path, help="Folder lưu NIfTI đã Overlay")
+    
+    # Config
+    parser.add_argument("--seg-model-root", type=Path, default=Path(DEFAULT_SEG_MODEL_ROOT))
+    parser.add_argument("--seg-chk", type=str, default=DEFAULT_SEG_CHK)
+    parser.add_argument("--seg-fold", type=str, default=DEFAULT_SEG_FOLD)
+    parser.add_argument("--overlay-boost", type=int, default=DEFAULT_OVERLAY_BOOST)
+    parser.add_argument("--temp-dir", type=Path, default=DEFAULT_TEMP_DIR)
+    
+    args = parser.parse_args()
 
-    targets = prepare_targets(args.input)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.temp_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Found {len(targets)} cases. Saving overlay to {args.output_dir}")
-    with tempfile.TemporaryDirectory(dir=str(args.temp_dir)) as tmp_root:
-        tmp_root = Path(tmp_root)
+    if args.input.is_file():
+        targets = [args.input]
+    else:
+        if list(args.input.glob("*.dcm")): targets = [args.input]
+        else: targets = sorted([d for d in args.input.iterdir() if d.is_dir()])
+        if not targets: targets = sorted(list(args.input.glob("*.nii.gz")))
+
+    logger.info(f"🚀 Stage 1 Start: {len(targets)} cases.")
+    logger.info(f"📂 Output Dir: {args.output_dir}")
+
+    # Initialize Predictor
+    logger.info("⚙️  Loading Segmentation Model...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    predictor = nnUNetPredictor(
+        tile_step_size=0.5,
+        use_gaussian=True,
+        use_mirroring=False,
+        device=device,
+        verbose=False,
+        verbose_preprocessing=False,
+        allow_tqdm=False
+    )
+    predictor.initialize_from_trained_model_folder(
+        str(args.seg_model_root),
+        use_folds=(args.seg_fold,),
+        checkpoint_name=args.seg_chk
+    )
+    logger.info("✅ Model Loaded Successfully.")
+
+    with tempfile.TemporaryDirectory(dir=str(args.temp_dir)) as temp_root:
         for t in tqdm(targets):
-            uid = t.name.replace(".nii.gz", "").replace(".nii", "")
-            case_tmp = tmp_root / uid
-            case_tmp.mkdir(exist_ok=True)
-            raw_nii = case_tmp / f"{uid}.nii.gz"
-            mask_dir = case_tmp / "masks"; mask_dir.mkdir(exist_ok=True)
+            process_case(t, args.output_dir, Path(temp_root), predictor, args.overlay_boost)
 
-            if t.is_dir():
-                convert_dicom_to_nifti(t, raw_nii)
-            else:
-                shutil.copy(t, raw_nii)
-
-            mask_nii = run_vessel_segmentation(raw_nii, mask_dir,
-                                               str(args.seg_model_root), args.seg_dataset,
-                                               args.seg_chk, args.seg_fold, args.seg_device)
-            overlay, spacing, origin, direction = apply_overlay(raw_nii, mask_nii, args.overlay_boost)
-            out_path = args.output_dir / f"{uid}.nii.gz"
-            save_overlay(overlay, spacing, origin, direction, out_path)
-    print("Done stage1.")
-
+    logger.info("✅ Stage 1 Complete!")
 
 if __name__ == "__main__":
     main()
