@@ -48,7 +48,7 @@ def convert_dicom_to_nifti(dicom_dir: Path, out_path: Path):
 
 def run_vessel_segmentation(input_nii: Path, output_dir: Path,
                             seg_model_root: str, seg_dataset: str,
-                            seg_chk: str, seg_fold: str):
+                            seg_chk: str, seg_fold: str, seg_device: str = "cuda"):
     case_id = input_nii.name.replace(".nii.gz", "").replace(".nii", "")
     temp_input_dir = input_nii.parent / "nnunet_seg_input"
     temp_input_dir.mkdir(exist_ok=True)
@@ -71,9 +71,15 @@ def run_vessel_segmentation(input_nii: Path, output_dir: Path,
         "-p", "nnUNetPlans",
         "-chk", seg_chk,
         "--disable_tta",
-        "-device", "cuda",
+        "-device", seg_device,
     ]
-    subprocess.run(cmd, check=True, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        subprocess.run(cmd, check=True, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        # In case of failure, print stderr for debugging then re-raise
+        err = e.stderr.decode(errors="ignore") if e.stderr else ""
+        print(f"\n❌ nnUNetv2_predict failed for {input_nii.name}:\n{err}")
+        raise
     expected_mask = output_dir / f"{case_id}.nii.gz"
     shutil.rmtree(temp_input_dir, ignore_errors=True)
     if not expected_mask.exists():
@@ -116,6 +122,7 @@ def main():
     ap.add_argument("--seg-dataset", type=str, default=DEFAULT_SEG_DATASET)
     ap.add_argument("--seg-chk", type=str, default=DEFAULT_SEG_CHK)
     ap.add_argument("--seg-fold", type=str, default=DEFAULT_SEG_FOLD)
+    ap.add_argument("--seg-device", type=str, default="cuda", help="Thiết bị chạy nnUNetv2_predict (cuda/cpu)")
     ap.add_argument("--overlay-boost", type=int, default=DEFAULT_OVERLAY_BOOST)
     ap.add_argument("--temp-dir", type=Path, default=DEFAULT_TEMP_DIR)
     args = ap.parse_args()
@@ -141,7 +148,7 @@ def main():
 
             mask_nii = run_vessel_segmentation(raw_nii, mask_dir,
                                                str(args.seg_model_root), args.seg_dataset,
-                                               args.seg_chk, args.seg_fold)
+                                               args.seg_chk, args.seg_fold, args.seg_device)
             overlay, spacing, origin, direction = apply_overlay(raw_nii, mask_nii, args.overlay_boost)
             out_path = args.output_dir / f"{uid}.nii.gz"
             save_overlay(overlay, spacing, origin, direction, out_path)
