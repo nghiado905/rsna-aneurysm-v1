@@ -1,95 +1,121 @@
 import argparse
 import ast
 from pathlib import Path
-import os
-import sys
 
 import numpy as np
 import pandas as pd
 import torch
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 
 from nnunetv2.dataset_conversion.kaggle_2025_rsna.official_data_to_nnunet import (
     load_and_crop,
 )
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 
-# ==================================================================================
-# 1. HÀM VẼ HEATMAP BLOB (Style mới bạn muốn áp dụng)
-# ==================================================================================
-def window_hu(vol, level=400.0, width=700.0):
-    """Windowing chuẩn cho mạch máu."""
-    low = level - width / 2.0
-    high = level + width / 2.0
-    vol = np.clip(vol, low, high)
-    vol = (vol - low) / (high - low)
-    return vol
-
-def save_heatmap_mip(volume, coords, label_name, prob, output_path):
-    """
-    Vẽ MIP axial đơn giản (giống logic inference.py): max trục Z, không cộng bbox, origin='lower'.
-    coords: (z, y, x)
-    """
-    try:
-        # Axial MIP (projection trục Z)
-        mip = volume.max(axis=0) if volume.ndim == 3 else volume
-        mip = (mip - mip.min()) / (mip.ptp() + 1e-8)
-
-        z_peak, y_peak, x_peak = map(int, coords)
-        h, w = mip.shape
-
-        fig, ax = plt.subplots(figsize=(8, 8), facecolor="black")
-        ax.imshow(mip, cmap="gray", origin="lower", vmin=0, vmax=1)
-
-        # Blob heatmap quanh peak
-        yy, xx = np.ogrid[:h, :w]
-        dist_sq = (xx - x_peak) ** 2 + (yy - y_peak) ** 2
-        blob = np.exp(-dist_sq / (2 * 12**2))
-        blob /= blob.max() + 1e-8
-        ax.imshow(blob, cmap="hot", alpha=blob * 0.75, origin="lower")
-
-        ax.scatter(x_peak, y_peak, c="red", s=180, edgecolors="white", linewidth=2.5, zorder=5)
-        ax.set_title(f"{label_name} | p={prob:.4f} | z={z_peak}", color="white", fontsize=14, pad=10)
-        ax.axis("off")
-
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="#111111")
-        plt.close(fig)
-
-    except Exception as e:
-        print(f"⚠️ Lỗi vẽ Heatmap: {e}")
-
-# ==================================================================================
-# 2. CODE CHÍNH
-# ==================================================================================
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("-i", "--input-dir", type=Path, required=True, help="Input directory")
-    p.add_argument("-o", "--output-path", type=Path, required=True, help="Output CSV")
-    p.add_argument("-m", "--model_folder", type=Path, required=True, help="Model folder")
-    p.add_argument("-c", "--chk", type=str, required=True, help="Checkpoint")
-    p.add_argument("--fold", type=ast.literal_eval, help="Fold tuple")
-    p.add_argument("--step_size", type=float, default=0.5)
-    p.add_argument("--disable_tta", action="store_true", default=False)
-    p.add_argument("--use_gaussian", action="store_true", default=False)
-    p.add_argument("--device", type=str, default="cuda")
-    p.add_argument("--viz_threshold", type=float, default=0.2, help="Threshold to save MIP")
-    
-    # Cho phép truyền file whitelist khác nếu muốn, mặc định dùng file hardcode bên dưới
-    p.add_argument("--whitelist-csv", type=Path, required=False)
+    p.add_argument(
+        "-i",
+        "--input-dir",
+        type=Path,
+        required=True,
+        help="Path to directory with all DICOM data, e.g. /path/to/rsna-intracranial-aneurysm-detection/series",
+    )
+    p.add_argument(
+        "-o",
+        "--output-path",
+        type=Path,
+        required=True,
+        help="Where to store the resulting csv, e.g. output.csv",
+    )
+    p.add_argument(
+        "-m",
+        "--model_folder",
+        type=Path,
+        required=True,
+        help="Path to model checkpoint, e.g. path/to/downloaded-checkpoint/Dataset004_iarsna_crop/Kaggle2025RSNATrainer__nnUNetResEncUNetMPlans__3d_fullres_bs32",
+    )
+
+    p.add_argument(
+        "-c",
+        "--chk",
+        type=str,
+        required=True,
+        help="Name of the checkpoint, e.g. checkpoint_epoch_1500.pth",
+    )
+    p.add_argument(
+        "--fold",
+        type=ast.literal_eval,
+        help="tuple of fold identifiers, e.g. \"('all',)\" or (0,1,2)",
+    )
+    p.add_argument(
+        "--step_size",
+        type=float,
+        required=False,
+        default=0.5,
+        help="Step size for sliding window prediction. The larger it is the faster but less accurate "
+        "the prediction. Default: 0.5. Cannot be larger than 1. We recommend the default.",
+    )
+    p.add_argument(
+        "--disable_tta",
+        action="store_true",
+        required=False,
+        default=False,
+        help="Set this flag to disable test time data augmentation in the form of mirroring. Faster, "
+        "but less accurate inference. Not recommended.",
+    )
+    p.add_argument(
+        "--use_gaussian",
+        action="store_true",
+        required=False,
+        default=False,
+        help="Set this flag to apply a gaussian weighting when aggregating the patches",
+    )
+    p.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        required=False,
+        help="Use this to set the device the inference should run with. Available options are 'cuda' "
+        "(GPU), 'cpu' (CPU) and 'mps' (Apple M1/M2). Do NOT use this to set which GPU ID! "
+        "Use CUDA_VISIBLE_DEVICES=X nnUNetv2_predict [...] instead!",
+    )
+    p.add_argument(
+        "--vessel-model-folder",
+        type=Path,
+        required=False,
+        default=None,
+        help="Path to vessel segmentation model folder (required when aneurysm model expects 2 channels).",
+    )
+    p.add_argument(
+        "--vessel-chk",
+        type=str,
+        required=False,
+        default="checkpoint_final.pth",
+        help="Vessel checkpoint file name.",
+    )
+    p.add_argument(
+        "--vessel-fold",
+        type=ast.literal_eval,
+        required=False,
+        default=("all",),
+        help="tuple of vessel fold identifiers, e.g. \"('all',)\" or (0,1,2)",
+    )
 
     return p.parse_args()
 
 
+def _parse_folds(fold_arg):
+    if fold_arg is None:
+        return ["all"]
+    if isinstance(fold_arg, (str, int)):
+        fold_arg = (fold_arg,)
+    return [i if i == "all" else int(i) for i in fold_arg]
+
+
 def main():
     args = parse_args()
-
-    # Tạo folder ảnh
-    args.output_path.parent.mkdir(parents=True, exist_ok=True)
-    mip_dir = args.output_path.parent / (args.output_path.stem + "_heatmap_mips")
-    mip_dir.mkdir(exist_ok=True, parents=True)
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     predictor = nnUNetPredictor(
@@ -97,118 +123,114 @@ def main():
         use_gaussian=args.use_gaussian,
         use_mirroring=not args.disable_tta,
         device=device,
-        verbose=False, verbose_preprocessing=False, allow_tqdm=False,
+        verbose=False,
+        verbose_preprocessing=False,
+        allow_tqdm=False,
     )
     predictor.initialize_from_trained_model_folder(
         args.model_folder,
-        [i if i == "all" else int(i) for i in args.fold],
+        _parse_folds(args.fold),
         checkpoint_name=args.chk,
     )
+    expected_channels = len(predictor.dataset_json.get("channel_names", {})) or 1
+
+    vessel_predictor = None
+    if expected_channels >= 2:
+        if args.vessel_model_folder is None:
+            raise ValueError(
+                "Aneurysm model expects 2 channels, but --vessel-model-folder was not provided."
+            )
+        vessel_predictor = nnUNetPredictor(
+            tile_step_size=args.step_size,
+            use_gaussian=args.use_gaussian,
+            use_mirroring=not args.disable_tta,
+            device=device,
+            verbose=False,
+            verbose_preprocessing=False,
+            allow_tqdm=False,
+        )
+        vessel_predictor.initialize_from_trained_model_folder(
+            args.vessel_model_folder,
+            _parse_folds(args.vessel_fold),
+            checkpoint_name=args.vessel_chk,
+        )
 
     preprocessor = predictor.configuration_manager.preprocessor_class()
-    labels_dict = predictor.dataset_json["labels"]
-    labels = ["SeriesInstanceUID"] + list(labels_dict.keys())[1:] + ["Aneurysm Present"]
-    idx_to_label = {v: k for k, v in labels_dict.items() if v != 0}
 
-    # =========================================================================
-    # [QUAN TRỌNG] LOGIC LỌC WHITELIST TỪ FILE GROUND TRUTH CỦA BẠN
-    # =========================================================================
-    series_list = list(args.input_dir.iterdir())
-    
-    # 1. Xác định đường dẫn file CSV whitelist
-    if args.whitelist_csv:
-        target_csv = args.whitelist_csv
-    else:
-        # Đường dẫn cứng bạn yêu cầu
-        target_csv = Path(r"D:\VietRAD\kaggle-rsna-intracranial-aneurysm-detection-2025-solution\analysis_results\ground_truth_coordinates.csv")
-    
-    # 2. Thực hiện lọc
-    if target_csv.exists():
-        try:
-            print(f"-> Đọc whitelist từ: {target_csv}")
-            df_sub = pd.read_csv(target_csv)
-            allowed_ids = set(df_sub["SeriesInstanceUID"].astype(str).str.strip())
-            
-            # Lọc danh sách file input
-            original_len = len(series_list)
-            series_list = [s for s in series_list if s.name in allowed_ids]
-            print(f"-> Đã lọc: {original_len} -> {len(series_list)} ca cần xử lý.")
-        except Exception as e:
-            print(f"⚠️ Lỗi khi đọc {target_csv}: {e}")
-    else:
-        print(f"⚠️ Không tìm thấy file whitelist: {target_csv}. Sẽ chạy TOÀN BỘ thư mục.")
-    # =========================================================================
-
-    # Resume logic
-    processed_ids = set()
+    labels = (
+        ["SeriesInstanceUID"]
+        + list(predictor.dataset_json["labels"].keys())[1:]
+        + ["Aneurysm Present"]
+    )
+    existing_ids = set()
+    res = []
     if args.output_path.exists():
         try:
-            processed_ids = set(pd.read_csv(args.output_path)["SeriesInstanceUID"].astype(str))
-        except: pass
-    else:
-        pd.DataFrame(columns=labels).to_csv(args.output_path, index=False)
-
-    print(f"🚀 Bắt đầu Inference... (Ảnh lưu tại {mip_dir})")
-
-    for series_dir in tqdm(series_list):
-        if series_dir.name in processed_ids:
-            continue
-
-        try:
-            # 1. Load
-            img, properties = load_and_crop(series_dir)
-            # img = np.flip(img, 1) # Flip theo training
-            
-            # 2. Predict
-            data, _, _ = preprocessor.run_case_npy(
-                np.array([img]), None, properties,
-                predictor.plans_manager, predictor.configuration_manager, predictor.dataset_json,
-            )
-            logits = predictor.predict_logits_from_preprocessed_data(
-                torch.from_numpy(data)
-            ).cpu()
-            probs = torch.sigmoid(logits)
-
-            # 3. Max pooling & Save CSV
-            max_per_c = torch.amax(probs, dim=(1, 2, 3)).to(dtype=torch.float32, device="cpu")
-            res_row = [series_dir.name] + max_per_c.numpy().tolist()
-            pd.DataFrame([res_row], columns=labels).to_csv(args.output_path, mode='a', header=False, index=False)
-
-            # =================================================================
-            # 4. ÁP DỤNG CÁCH VẼ HEATMAP BLOB (Chèn vào đây)
-            # =================================================================
-            fg_probs = max_per_c.numpy()[1:] # Bỏ bg
-            best_prob = np.max(fg_probs)
-
-            if best_prob > args.viz_threshold:
-                # Tìm class và tọa độ
-                best_cls_idx = np.argmax(fg_probs) + 1
-                label_name = idx_to_label.get(best_cls_idx, "Unknown")
-                
-                prob_map = probs[best_cls_idx]
-                peak_idx = torch.argmax(prob_map).item()
-                z, y, x = np.unravel_index(peak_idx, prob_map.shape)
-                
-                # Tên file
-                safe_name = label_name.replace(" ", "_").replace("/", "-")
-                png_name = f"{series_dir.name}_{safe_name}_p{best_prob:.2f}.png"
-                
-                # Gọi hàm vẽ Heatmap mới
-                save_heatmap_mip(img, (z, y, x), label_name, best_prob, mip_dir / png_name)
-            # =================================================================
-
+            df_prev = pd.read_csv(args.output_path)
+            if "SeriesInstanceUID" in df_prev.columns:
+                existing_ids = set(df_prev["SeriesInstanceUID"].astype(str))
+                res = df_prev.values.tolist()
+                print(f"Skipping {len(existing_ids)} already processed cases from {args.output_path}")
         except Exception as e:
-            # print(f"Error {series_dir.name}: {e}")
+            print(f"Could not load existing results ({e}); starting fresh.")
+
+    for series_dir in tqdm(list(args.input_dir.iterdir())):
+        if series_dir.name in existing_ids:
+            print(f"Already exists, skipping: {series_dir.name}")
             continue
+        img, properties = load_and_crop(series_dir)
+        img = np.flip(img, 1)
+        if expected_channels == 1:
+            input_npy = np.array([img], dtype=np.float32)
+        else:
+            vessel_logits = vessel_predictor.predict_single_npy_array(
+                np.array([img], dtype=np.float32),
+                properties,
+                None,
+                None,
+                False,
+            )
+            vessel_mask = (np.argmax(vessel_logits, axis=0) > 0).astype(np.float32)
+            input_npy = np.stack([img.astype(np.float32), vessel_mask], axis=0)
+
+        data, _, _ = preprocessor.run_case_npy(
+            input_npy,
+            None,
+            properties,
+            predictor.plans_manager,
+            predictor.configuration_manager,
+            predictor.dataset_json,
+        )
+        logits = predictor.predict_logits_from_preprocessed_data(
+            torch.from_numpy(data)
+        ).cpu()
+        probs = torch.sigmoid(logits)
+
+        max_per_c = torch.amax(probs, dim=(1, 2, 3)).to(
+            dtype=torch.float32, device="cpu"
+        )
+
+        res.append([series_dir.name] + max_per_c.numpy().tolist())
+        print(max_per_c)
+        pd.DataFrame(res, columns=labels).to_csv(args.output_path, index=False)
 
     print(f"Results saved to {args.output_path}")
 
 
 if __name__ == "__main__":
     main()
-
-
-# import argparse
+    # python inference.py \
+    # -i /path/to/rsna-intracranial-aneurysm-detection/series \
+    # -o output.csv \
+    # -m /path/to/downloaded-checkpoint/Dataset004_iarsna_crop/Kaggle2025RSNATrainer__nnUNetResEncUNetMPlans__3d_fullres_bs32 \
+    # -c checkpoint_epoch_1500.pth \
+    # --fold "('all',)"
+    # --disable_tta
+    
+    
+    
+    
+    # import argparse
 # import ast
 # from pathlib import Path
 # import os
@@ -220,118 +242,122 @@ if __name__ == "__main__":
 # from tqdm import tqdm
 # import matplotlib.pyplot as plt
 
-# # --- 1. IMPORT NNUNET ---
-# try:
-#     from nnunetv2.dataset_conversion.kaggle_2025_rsna.official_data_to_nnunet import (
-#         load_and_crop,
-#     )
-#     from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
-# except ImportError:
-#     print("❌ Lỗi: Không tìm thấy thư viện nnUNetv2.")
-#     sys.exit(1)
+# from nnunetv2.dataset_conversion.kaggle_2025_rsna.official_data_to_nnunet import (
+#     load_and_crop,
+# )
+# from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 
-# # ==================================================================================
-# # 2. HÀM VẼ HEATMAP CHỈ CHO AXIAL
-# # ==================================================================================
-
+# # --- 1. CẤU HÌNH VẼ ẢNH (MIP) ---
 # def window_hu(vol, level=400.0, width=700.0):
-#     """Windowing chuẩn CTA: Level 400, Width 700."""
+#     """Windowing chuẩn cho mạch máu (CTA)."""
 #     low = level - width / 2.0
 #     high = level + width / 2.0
 #     vol = np.clip(vol, low, high)
 #     vol = (vol - low) / (high - low)
 #     return vol
 
-# def save_axial_heatmap(volume, coords, label_name, prob, output_path):
+# def save_mip_viz(volume, coords, label_name, prob, output_path):
 #     """
-#     Chỉ vẽ MIP Axial (Z-projection) với Heatmap Blob.
+#     Vẽ MIP từ chính dữ liệu model đã nhìn thấy.
+#     volume: (Z, Y, X)
+#     coords: (z, y, x)
 #     """
 #     try:
-#         # 1. Windowing
-#         vol_windowed = window_hu(volume, level=400.0, width=700.0)
-        
-#         z_peak, y_peak, x_peak = map(int, coords)
-#         z_dim, y_dim, x_dim = vol_windowed.shape
-#         slab = 15 # Độ dày lát cắt gộp
+#         # Windowing
+#         vol = window_hu(volume)
+#         z_peak, y_peak, x_peak = coords
+#         d, h, w = vol.shape
+#         slab = 10 
 
-#         # --- TẠO ẢNH MIP AXIAL ---
-#         # Trục Z là trục 0. Lấy max theo trục 0 để có ảnh (Y, X)
-#         z_start = max(0, int(z_peak - slab))
-#         z_end = min(z_dim, int(z_peak + slab))
-#         if z_end <= z_start: z_end = z_start + 1
+#         # --- TẠO 3 GÓC CHIẾU ---
         
-#         mip_axial = np.max(vol_windowed[z_start:z_end, :, :], axis=0)
+#         # 1. AXIAL (Chiếu trục Z - Đỉnh đầu xuống)
+#         z_s, z_e = max(0, int(z_peak-slab)), min(d, int(z_peak+slab))
+#         if z_e <= z_s: z_e = z_s + 1
+#         # Max theo trục 0 (Z) -> Ảnh còn lại (Y, X)
+#         mip_ax = np.max(vol[z_s:z_e, :, :], axis=0) 
         
-#         # !!! QUAN TRỌNG: Lật trục Y (flipud) để Anterior (phía trước) nằm trên !!!
-#         mip_axial = np.flipud(mip_axial)
+#         # 2. CORONAL (Chiếu trục Y - Trước sau)
+#         y_s, y_e = max(0, int(y_peak-slab)), min(h, int(y_peak+slab))
+#         if y_e <= y_s: y_e = y_s + 1
+#         # Max theo trục 1 (Y) -> Ảnh còn lại (Z, X)
+#         mip_cor = np.max(vol[:, y_s:y_e, :], axis=1)
         
-#         # Tọa độ vẽ: X giữ nguyên, Y đảo ngược do flipud
-#         pt_x = x_peak
-#         pt_y = y_dim - 1 - y_peak
+#         # 3. SAGITTAL (Chiếu trục X - Trái phải)
+#         x_s, x_e = max(0, int(x_peak-slab)), min(w, int(x_peak+slab))
+#         if x_e <= x_s: x_e = x_s + 1
+#         # Max theo trục 2 (X) -> Ảnh còn lại (Z, Y)
+#         mip_sag = np.max(vol[:, :, x_s:x_e], axis=2)
 
-#         # --- VẼ HÌNH ---
-#         fig, ax = plt.subplots(figsize=(10, 10), facecolor='black')
-        
-#         # 1. Vẽ nền đen trắng
-#         ax.imshow(mip_axial, cmap="gray", origin="lower", vmin=0, vmax=1)
-        
-#         # 2. Vẽ Heatmap & Điểm tâm
-#         if pt_x is not None and pt_y is not None:
-#             # Điểm tâm đỏ
-#             ax.scatter(pt_x, pt_y, c="red", s=200, edgecolors="white", linewidth=3, zorder=5)
+#         # --- VẼ ---
+#         fig, axes = plt.subplots(1, 3, figsize=(18, 6), facecolor='black')
+#         fig.suptitle(f"{label_name} | P={prob:.4f}", color='#00FF00', fontsize=16, fontweight='bold')
+
+#         # HÀM VẼ CON
+#         def draw(ax, img, x_dot, y_dot, title):
+#             # Dùng origin='lower' để toạ độ (0,0) nằm góc dưới bên trái
+#             # Đây là mấu chốt để không bị lệch trục Y
+#             ax.imshow(img, cmap='gray', origin='lower', vmin=0, vmax=1)
             
-#             # Vòng tròn tỏa nhiệt (Gaussian Blob)
-#             h, w = mip_axial.shape
-#             yy, xx = np.ogrid[:h, :w]
-#             dist_sq = (xx - pt_x)**2 + (yy - pt_y)**2
-#             blob = np.exp(-dist_sq / (2 * 15**2)) # Sigma = 15 (to hơn chút cho dễ nhìn)
-#             blob /= (blob.max() + 1e-8)
+#             # Vẽ điểm
+#             ax.scatter(x_dot, y_dot, c='red', s=100, marker='x', linewidth=2)
             
-#             ax.imshow(blob, cmap="hot", alpha=blob * 0.6, origin="lower")
+#             # Vẽ heatmap (Gaussian blob)
+#             rows, cols = img.shape
+#             yy, xx = np.ogrid[:rows, :cols]
+#             dist = (xx - x_dot)**2 + (yy - y_dot)**2
+#             blob = np.exp(-dist / (2 * 10**2))
+#             ax.imshow(blob, cmap='hot', alpha=blob*0.6, origin='lower')
+            
+#             ax.set_title(title, color='white')
+#             ax.axis('off')
 
-#         ax.set_title(f"{label_name}\nProb: {prob:.4f} | Z={z_peak}", color='#00FF00', fontsize=18, fontweight='bold', pad=15)
-#         ax.axis('off')
+#         # 1. AXIAL: Ảnh (Y, X). Matplotlib vẽ (col, row) tức là (X, Y)
+#         # Điểm vẽ: x=x_peak, y=y_peak
+#         draw(axes[0], mip_ax, x_peak, y_peak, f"Axial (Z={z_peak})")
+
+#         # 2. CORONAL: Ảnh (Z, X). Matplotlib vẽ (X, Z)
+#         # Điểm vẽ: x=x_peak, y=z_peak
+#         draw(axes[1], mip_cor, x_peak, z_peak, f"Coronal (Y={y_peak})")
+
+#         # 3. SAGITTAL: Ảnh (Z, Y). Matplotlib vẽ (Y, Z)
+#         # Điểm vẽ: x=y_peak, y=z_peak
+#         draw(axes[2], mip_sag, y_peak, z_peak, f"Sagittal (X={x_peak})")
 
 #         plt.tight_layout()
-#         plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='black')
+#         plt.savefig(output_path, dpi=100, facecolor='black')
 #         plt.close(fig)
 
 #     except Exception as e:
-#         print(f"⚠️ Lỗi vẽ Axial MIP: {e}")
+#         print(f"Viz Error: {e}")
 
-# # ==================================================================================
-# # 3. MAIN FUNCTION
-# # ==================================================================================
-
+# # --- 2. PARSE ARGS (Giữ nguyên) ---
 # def parse_args():
 #     p = argparse.ArgumentParser()
-#     p.add_argument("-i", "--input-dir", type=Path, required=True, help="Input directory")
-#     p.add_argument("-o", "--output-path", type=Path, required=True, help="Output CSV")
-#     p.add_argument("-m", "--model_folder", type=Path, required=True, help="Model folder")
-#     p.add_argument("-c", "--chk", type=str, required=True, help="Checkpoint name")
-#     p.add_argument("--fold", type=ast.literal_eval, help="Fold tuple")
+#     p.add_argument("-i", "--input-dir", type=Path, required=True, help="Input dir")
+#     p.add_argument("-o", "--output-path", type=Path, required=True, help="Output csv")
+#     p.add_argument("-m", "--model_folder", type=Path, required=True, help="Model path")
+#     p.add_argument("-c", "--chk", type=str, required=True, help="Checkpoint")
+#     p.add_argument("--fold", type=ast.literal_eval, help="Fold")
 #     p.add_argument("--step_size", type=float, default=0.5)
 #     p.add_argument("--disable_tta", action="store_true", default=False)
 #     p.add_argument("--use_gaussian", action="store_true", default=False)
 #     p.add_argument("--device", type=str, default="cuda")
+    
+#     # Thêm ngưỡng vẽ để đỡ spam ảnh rác
 #     p.add_argument("--viz_threshold", type=float, default=0.2, help="Threshold to save MIP")
     
-#     # File whitelist mặc định
-#     p.add_argument("--whitelist-csv", type=Path, 
-#                    default=Path("output1/submission.csv"),
-#                    help="Path to whitelist CSV")
 #     return p.parse_args()
 
+# # --- 3. MAIN FUNCTION ---
 # def main():
 #     args = parse_args()
 
-#     # Tạo folder ảnh
+#     # Tạo folder ảnh (Cùng cấp với file output csv)
 #     args.output_path.parent.mkdir(parents=True, exist_ok=True)
-#     mip_dir = args.output_path.parent / (args.output_path.stem + "_axial_mips")
+#     mip_dir = args.output_path.parent / (args.output_path.stem + "_mips")
 #     mip_dir.mkdir(exist_ok=True, parents=True)
 
-#     # --- LOAD MODEL ---
-#     print(f"Loading model from {args.model_folder}...")
 #     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 #     predictor = nnUNetPredictor(
 #         tile_step_size=args.step_size,
@@ -345,98 +371,110 @@ if __name__ == "__main__":
 #         [i if i == "all" else int(i) for i in args.fold],
 #         checkpoint_name=args.chk,
 #     )
+
 #     preprocessor = predictor.configuration_manager.preprocessor_class()
 
-#     # --- XỬ LÝ LABELS ---
+#     # Lấy tên labels (bỏ background)
 #     labels_dict = predictor.dataset_json["labels"]
-#     idx_to_label = {int(v): k for k, v in labels_dict.items() if k != "background" and int(v) != 0}
-#     ordered_indices = sorted(idx_to_label.keys()) 
-#     label_names_ordered = [idx_to_label[i] for i in ordered_indices]
+#     # Header chuẩn của bạn
+#     labels = ["SeriesInstanceUID"] + list(labels_dict.keys())[1:] + ["Aneurysm Present"]
     
-#     # Header CSV
-#     csv_header = ["SeriesInstanceUID"] + label_names_ordered + ["Aneurysm Present", "peak_label", "coord_z", "coord_y", "coord_x"]
+#     # Map index -> tên để vẽ ảnh
+#     idx_to_name = {v: k for k, v in labels_dict.items() if v != 0}
 
-#     # --- LỌC WHITELIST ---
+#     # === LOGIC WHITELIST (GIỮ NGUYÊN TỪ YÊU CẦU TRƯỚC) ===
 #     series_list = list(args.input_dir.iterdir())
-    
-#     if args.whitelist_csv.exists():
+#     submission_path = Path("output1/submission.csv")
+#     if submission_path.exists():
 #         try:
-#             print(f"-> Whitelist: {args.whitelist_csv}")
-#             df_sub = pd.read_csv(args.whitelist_csv)
-#             # Quan trọng: strip khoảng trắng ở ID
-#             whitelist_uids = set(df_sub["SeriesInstanceUID"].astype(str).str.strip())
-#             series_list = [s for s in series_list if s.name in whitelist_uids]
-#             print(f"-> Đã lọc: Còn {len(series_list)} cases.")
-#         except Exception as e:
-#             print(f"⚠️ Lỗi whitelist: {e}")
-#     else:
-#         print("⚠️ Không thấy whitelist, chạy toàn bộ.")
-
-#     # --- RESUME ---
-#     processed_ids = set()
-#     if args.output_path.exists():
-#         try:
-#             df_done = pd.read_csv(args.output_path)
-#             if "SeriesInstanceUID" in df_done.columns:
-#                 processed_ids = set(df_done["SeriesInstanceUID"].astype(str))
-#             print(f"-> Resume: Đã xong {len(processed_ids)} cases.")
+#             df_sub = pd.read_csv(submission_path)
+#             whitelist = set(df_sub["SeriesInstanceUID"].astype(str).str.strip())
+#             series_list = [s for s in series_list if s.name in whitelist]
+#             print(f"Filtered to {len(series_list)} cases from submission.csv")
 #         except: pass
+    
+#     # CSV Header mở rộng để lưu thêm thông tin tọa độ (nếu muốn debug)
+#     # Nhưng để khớp với code của bạn, ta chỉ lưu file chính đúng format, tọa độ chỉ dùng để vẽ.
+    
+#     # Mở file CSV để ghi header trước (Real-time saving)
+#     if not args.output_path.exists():
+#         pd.DataFrame(columns=labels).to_csv(args.output_path, index=False)
+#         processed_ids = set()
 #     else:
-#         pd.DataFrame(columns=csv_header).to_csv(args.output_path, index=False)
+#         # Resume logic
+#         try:
+#             processed_ids = set(pd.read_csv(args.output_path)["SeriesInstanceUID"].astype(str))
+#         except:
+#             processed_ids = set()
 
-#     print(f"🚀 Start Inference...")
+#     print(f"Start Processing {len(series_list)} cases...")
 
-#     # --- MAIN LOOP ---
 #     for series_dir in tqdm(series_list):
-#         uid = series_dir.name
-        
-#         if uid in processed_ids:
+#         if series_dir.name in processed_ids:
 #             continue
 
 #         try:
-#             # 1. Load & Flip
+#             # --- CODE CHUẨN CỦA BẠN (GIỮ NGUYÊN) ---
 #             img, properties = load_and_crop(series_dir)
-#             img = np.flip(img, 1)
-
-#             # 2. Predict
+#             img = np.flip(img, 1) # <--- QUAN TRỌNG: Ảnh đã bị lật ở đây
+            
 #             data, _, _ = preprocessor.run_case_npy(
-#                 np.array([img]), None, properties,
-#                 predictor.plans_manager, predictor.configuration_manager, predictor.dataset_json,
+#                 np.array([img]),
+#                 None,
+#                 properties,
+#                 predictor.plans_manager,
+#                 predictor.configuration_manager,
+#                 predictor.dataset_json,
 #             )
-#             logits = predictor.predict_logits_from_preprocessed_data(torch.from_numpy(data)).cpu()
+#             logits = predictor.predict_logits_from_preprocessed_data(
+#                 torch.from_numpy(data)
+#             ).cpu()
 #             probs = torch.sigmoid(logits)
 
-#             # 3. Post-process
-#             max_probs_per_class = torch.amax(probs, dim=(1, 2, 3)).numpy()
-#             fg_probs = max_probs_per_class[1:] 
-#             aneurysm_present_prob = np.max(fg_probs)
+#             max_per_c = torch.amax(probs, dim=(1, 2, 3)).to(
+#                 dtype=torch.float32, device="cpu"
+#             )
+#             # ----------------------------------------
 
-#             # Find Peak
-#             best_rel_idx = np.argmax(fg_probs)
-#             best_abs_idx = best_rel_idx + 1
-#             label_name = idx_to_label.get(best_abs_idx, "Unknown")
+#             # --- PHẦN BỔ SUNG: VẼ VÀ LƯU ---
             
-#             prob_map = probs[best_abs_idx]
-#             peak_idx = torch.argmax(prob_map).item()
-#             z, y, x = np.unravel_index(peak_idx, prob_map.shape)
+#             # 1. Lưu CSV ngay lập tức (Append mode)
+#             res_row = [series_dir.name] + max_per_c.numpy().tolist()
+#             pd.DataFrame([res_row], columns=labels).to_csv(args.output_path, mode='a', header=False, index=False)
 
-#             # 4. Save CSV
-#             row_data = [uid] + fg_probs.tolist() + [aneurysm_present_prob, label_name, z, y, x]
-#             pd.DataFrame([row_data], columns=csv_header).to_csv(args.output_path, mode='a', header=False, index=False)
-
-#             # 5. Save Axial MIP Only
-#             if aneurysm_present_prob > args.viz_threshold:
-#                 safe_name = label_name.replace(" ", "_").replace("/", "-")
-#                 png_name = f"{uid}_{safe_name}_p{aneurysm_present_prob:.2f}.png"
+#             # 2. Tính toán để vẽ (chỉ vẽ nếu xác suất cao)
+#             # max_per_c bao gồm cả background (index 0) nếu model output có bg
+#             # Thường output nnunet shape [C, Z, Y, X].
+            
+#             probs_np = probs.numpy() # (C, Z, Y, X)
+#             fg_probs = max_per_c[1:] # Bỏ background
+#             best_prob = torch.max(fg_probs).item()
+            
+#             if best_prob > args.viz_threshold:
+#                 # Tìm vị trí (z, y, x) của điểm max
+#                 best_cls_idx = torch.argmax(fg_probs).item() + 1 # +1 vì bỏ bg
+#                 label_name = idx_to_name.get(best_cls_idx, "Unknown")
                 
-#                 # Chỉ gọi hàm vẽ Axial
-#                 save_axial_heatmap(img, (z, y, x), label_name, aneurysm_present_prob, mip_dir / png_name)
+#                 # Lấy bản đồ xác suất của class đó
+#                 prob_map = probs_np[best_cls_idx]
+                
+#                 # Tìm tọa độ đỉnh
+#                 # Lưu ý: prob_map khớp với img ĐÃ FLIP (vì img -> predict -> prob_map)
+#                 peak_idx = np.argmax(prob_map)
+#                 z, y, x = np.unravel_index(peak_idx, prob_map.shape)
+                
+#                 # Vẽ ảnh
+#                 # Lưu ý: Truyền vào `img` (đã flip ở dòng img = np.flip(img, 1))
+#                 # thì tọa độ (z, y, x) sẽ khớp hoàn toàn.
+#                 safe_name = label_name.replace(" ", "_")
+#                 png_name = f"{series_dir.name}_{safe_name}_p{best_prob:.2f}.png"
+#                 save_mip_viz(img, (z, y, x), label_name, best_prob, mip_dir / png_name)
 
 #         except Exception as e:
-#             print(f"❌ Error {uid}: {e}")
+#             print(f"Error {series_dir.name}: {e}")
 #             continue
 
-#     print(f"\n✅ Done! CSV: {args.output_path}")
+#     print(f"Done. CSV: {args.output_path}")
 
 # if __name__ == "__main__":
 #     main()

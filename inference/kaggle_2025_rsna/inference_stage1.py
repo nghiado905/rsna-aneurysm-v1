@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import torch
 import torch.nn.functional as F
 
@@ -114,6 +115,32 @@ def run_vessel_segmentation_direct(input_nii_path, predictor):
     
     return pred_itk
 
+
+def build_predictor(args):
+    """Khởi tạo predictor (dùng cho đa luồng, mỗi worker 1 predictor riêng)."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    predictor = nnUNetPredictor(
+        tile_step_size=0.5,
+        use_gaussian=True,
+        use_mirroring=False,
+        device=device,
+        verbose=False,
+        verbose_preprocessing=False,
+        allow_tqdm=False
+    )
+    predictor.initialize_from_trained_model_folder(
+        str(args.seg_model_root),
+        use_folds=(args.seg_fold,),
+        checkpoint_name=args.seg_chk
+    )
+    return predictor
+
+
+def chunk_list(seq, n):
+    """Chia list seq thành n phần gần bằng nhau."""
+    k, m = divmod(len(seq), n)
+    return [seq[i*k + min(i, m):(i+1)*k + min(i+1, m)] for i in range(n) if seq[i*k + min(i, m):(i+1)*k + min(i+1, m)]]
+
 def apply_overlay_and_save(img_path, mask_itk, save_path, boost_val):
     """
     Overlay -> Save NIfTI mới
@@ -182,6 +209,7 @@ def main():
     parser.add_argument("--seg-fold", type=str, default=DEFAULT_SEG_FOLD)
     parser.add_argument("--overlay-boost", type=int, default=DEFAULT_OVERLAY_BOOST)
     parser.add_argument("--temp-dir", type=Path, default=DEFAULT_TEMP_DIR)
+    parser.add_argument("--num-workers", type=int, default=1, help="Số luồng xử lý song song (mỗi worker 1 predictor riêng)")
     
     args = parser.parse_args()
 
@@ -197,30 +225,42 @@ def main():
 
     logger.info(f"🚀 Stage 1 Start: {len(targets)} cases.")
     logger.info(f"📂 Output Dir: {args.output_dir}")
+    logger.info(f"🧵 Num workers: {args.num_workers}")
 
-    # Initialize Predictor
-    logger.info("⚙️  Loading Segmentation Model...")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    predictor = nnUNetPredictor(
-        tile_step_size=0.5,
-        use_gaussian=True,
-        use_mirroring=False,
-        device=device,
-        verbose=False,
-        verbose_preprocessing=False,
-        allow_tqdm=False
-    )
-    predictor.initialize_from_trained_model_folder(
-        str(args.seg_model_root),
-        use_folds=(args.seg_fold,),
-        checkpoint_name=args.seg_chk
-    )
-    logger.info("✅ Model Loaded Successfully.")
+    if args.num_workers <= 1 or len(targets) <= 1:
+        # Single worker
+        logger.info("⚙️  Loading Segmentation Model (single worker)...")
+        predictor = build_predictor(args)
+        logger.info("✅ Model Loaded.")
 
-    with tempfile.TemporaryDirectory(dir=str(args.temp_dir)) as temp_root:
-        for t in tqdm(targets):
-            process_case(t, args.output_dir, Path(temp_root), predictor, args.overlay_boost)
+        with tempfile.TemporaryDirectory(dir=str(args.temp_dir)) as temp_root:
+            for t in tqdm(targets):
+                uid = t.name.replace(".nii.gz", "").replace(".nii", "")
+                final_out_path = args.output_dir / f"{uid}.nii.gz"
+                if final_out_path.exists():
+                    logger.info(f"Skip {uid} (đã có kết quả)")
+                    continue
+                process_case(t, args.output_dir, Path(temp_root), predictor, args.overlay_boost)
+    else:
+        # Multi-threaded: mỗi worker tự load predictor riêng
+        chunks = chunk_list(targets, args.num_workers)
+        logger.info(f"⚙️  Loading {len(chunks)} predictors (one per worker)...")
+
+        def worker(chunk):
+            pred = build_predictor(args)
+            with tempfile.TemporaryDirectory(dir=str(args.temp_dir)) as temp_root:
+                for t in chunk:
+                    uid = t.name.replace(".nii.gz", "").replace(".nii", "")
+                    final_out_path = args.output_dir / f"{uid}.nii.gz"
+                    if final_out_path.exists():
+                        continue
+                    process_case(t, args.output_dir, Path(temp_root), pred, args.overlay_boost)
+            return len(chunk)
+
+        with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
+            futures = [ex.submit(worker, c) for c in chunks]
+            for _ in tqdm(as_completed(futures), total=len(futures), desc="Workers"):
+                _.result()
 
     logger.info("✅ Stage 1 Complete!")
 

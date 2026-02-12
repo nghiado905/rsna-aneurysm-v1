@@ -27,7 +27,7 @@ def parse_args():
         "--output-path",
         type=Path,
         required=True,
-        help="Where to store the resulting csv, e.g. output.csv",
+        help="Where to store the resulting csv, e.g. output.csv (if a directory is given, submission.csv is created inside it)",
     )
     p.add_argument(
         "-m",
@@ -81,12 +81,23 @@ def parse_args():
         "(GPU), 'cpu' (CPU) and 'mps' (Apple M1/M2). Do NOT use this to set which GPU ID! "
         "Use CUDA_VISIBLE_DEVICES=X nnUNetv2_predict [...] instead!",
     )
+    p.add_argument(
+        "--missing-channel-mode",
+        type=str,
+        default="repeat",
+        choices=("repeat", "zeros"),
+        help="How to fill missing input channels when model expects more channels than provided.",
+    )
 
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    if args.output_path.suffix.lower() != ".csv":
+        args.output_path.mkdir(parents=True, exist_ok=True)
+        args.output_path = args.output_path / "submission.csv"
+        print(f"Output path is a directory; writing CSV to: {args.output_path}")
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     predictor = nnUNetPredictor(
@@ -105,18 +116,47 @@ def main():
     )
 
     preprocessor = predictor.configuration_manager.preprocessor_class()
+    expected_channels = len(predictor.dataset_json.get("channel_names", {}))
+    if expected_channels <= 0:
+        expected_channels = 1
 
     labels = (
         ["SeriesInstanceUID"]
         + list(predictor.dataset_json["labels"].keys())[1:]
         + ["Aneurysm Present"]
     )
+    existing_ids = set()
     res = []
+    if args.output_path.exists():
+        try:
+            df_prev = pd.read_csv(args.output_path)
+            if "SeriesInstanceUID" in df_prev.columns:
+                existing_ids = set(df_prev["SeriesInstanceUID"].astype(str))
+                res = df_prev.values.tolist()
+                print(f"Skipping {len(existing_ids)} already processed cases from {args.output_path}")
+        except Exception as e:
+            print(f"Could not load existing results ({e}); starting fresh.")
+
     for series_dir in tqdm(list(args.input_dir.iterdir())):
+        if series_dir.name in existing_ids:
+            print(f"Already exists, skipping: {series_dir.name}")
+            continue
         img, properties = load_and_crop(series_dir)
         img = np.flip(img, 1)
+        input_data = np.array([img], dtype=np.float32)
+        if expected_channels > input_data.shape[0]:
+            n_missing = expected_channels - input_data.shape[0]
+            if args.missing_channel_mode == "repeat":
+                extra = np.repeat(input_data[:1], n_missing, axis=0)
+            else:
+                extra = np.zeros((n_missing,) + input_data.shape[1:], dtype=input_data.dtype)
+            input_data = np.concatenate([input_data, extra], axis=0)
+            print(
+                f"[WARN] {series_dir.name}: model expects {expected_channels} channels, "
+                f"input has 1; filled {n_missing} channel(s) with mode={args.missing_channel_mode}."
+            )
         data, _, _ = preprocessor.run_case_npy(
-            np.array([img]),
+            input_data,
             None,
             properties,
             predictor.plans_manager,

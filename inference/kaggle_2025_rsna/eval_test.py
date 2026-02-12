@@ -1,269 +1,193 @@
 import argparse
-import ast
-import json
-from pathlib import Path
-import os
+import tempfile
 import sys
-
+import os
+import shutil
+import logging
+from pathlib import Path
 import numpy as np
+import SimpleITK as sitk
+from tqdm import tqdm
 import pandas as pd
 import torch
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-import SimpleITK as sitk  # <--- Thêm thư viện đọc NIfTI
+import torch.nn.functional as F
+from skimage.filters import sato
+from scipy.ndimage import distance_transform_edt # Nhanh hơn Sato nhiều
 
-from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+# ================= IMPORT NNUNET =================
+try:
+    from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+except ImportError:
+    print("❌ Thiếu thư viện nnunetv2.")
+    sys.exit(1)
 
-# ==================================================================================
-# 1. HÀM HELPER & VISUALIZATION
-# ==================================================================================
+# ================= LOGGING =================
+def setup_logger():
+    logger = logging.getLogger("Inference_2Channel")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s', datefmt='%H:%M:%S'))
+        logger.addHandler(handler)
+    return logger
 
-def window_hu(vol, level=400.0, width=700.0):
-    """Windowing chuẩn cho mạch máu."""
-    low = level - width / 2.0
-    high = level + width / 2.0
-    vol = np.clip(vol, low, high)
-    vol = (vol - low) / (high - low)
-    return vol
+logger = setup_logger()
 
-def save_heatmap_mip(volume, coords, label_name, prob, output_path):
-    """
-    Vẽ MIP axial đơn giản.
-    """
-    try:
-        # Axial MIP (projection trục Z)
-        mip = volume.max(axis=0) if volume.ndim == 3 else volume
-        mip = (mip - mip.min()) / (mip.ptp() + 1e-8)
+# ================= HÀM XỬ LÝ PHỤ TRỢ =================
 
-        z_peak, y_peak, x_peak = map(int, coords)
-        h, w = mip.shape
+def convert_dicom_to_nifti(dicom_dir, out_path):
+    reader = sitk.ImageSeriesReader()
+    dicom_names = reader.GetGDCMSeriesFileNames(str(dicom_dir))
+    if not dicom_names:
+        raise ValueError(f"Không tìm thấy DICOM trong {dicom_dir}")
+    reader.SetFileNames(dicom_names)
+    image = reader.Execute()
+    sitk.WriteImage(image, str(out_path))
 
-        fig, ax = plt.subplots(figsize=(8, 8), facecolor="black")
-        ax.imshow(mip, cmap="gray", origin="lower", vmin=0, vmax=1)
+def get_predictor(model_root, chk, fold):
+    """Load model an toàn"""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    predictor = nnUNetPredictor(
+        tile_step_size=0.5,
+        use_gaussian=True,
+        use_mirroring=False,
+        device=device,
+        verbose=False,
+        verbose_preprocessing=False,
+        allow_tqdm=False
+    )
+    predictor.initialize_from_trained_model_folder(
+        str(model_root),
+        use_folds=(fold,),
+        checkpoint_name=chk
+    )
+    return predictor
 
-        # Blob heatmap quanh peak
-        yy, xx = np.ogrid[:h, :w]
-        dist_sq = (xx - x_peak) ** 2 + (yy - y_peak) ** 2
-        blob = np.exp(-dist_sq / (2 * 12**2))
-        blob /= blob.max() + 1e-8
-        ax.imshow(blob, cmap="hot", alpha=blob * 0.75, origin="lower")
+# ================= PIPELINE CHÍNH =================
 
-        ax.scatter(x_peak, y_peak, c="red", s=180, edgecolors="white", linewidth=2.5, zorder=5)
-        ax.set_title(f"{label_name} | p={prob:.4f} | z={z_peak}", color="white", fontsize=14, pad=10)
-        ax.axis("off")
-
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="#111111")
-        plt.close(fig)
-
-    except Exception as e:
-        print(f"⚠️ Lỗi vẽ Heatmap: {e}")
-
-def load_nifti_simple(nifti_path):
-    """
-    Đọc file .nii/.nii.gz và trả về array + properties cho nnU-Net.
-    """
-    # Đọc ảnh bằng SimpleITK
-    img_itk = sitk.ReadImage(str(nifti_path))
+def process_case_optimized(uid, input_path, output_csv, vessel_predictor, aneurysm_predictor, temp_root):
+    # 1. Chuẩn bị file NIfTI
+    raw_nii = temp_root / f"{uid}.nii.gz"
     
-    # SimpleITK trả về (X, Y, Z), convert sang numpy (Z, Y, X)
-    img_npy = sitk.GetArrayFromImage(img_itk).astype(np.float32)
+    if input_path.is_dir():
+        convert_dicom_to_nifti(input_path, raw_nii)
+    else:
+        # Nếu đã là nifti thì dùng luôn, không cần copy nếu muốn tiết kiệm IO
+        # Nhưng để an toàn type, ta đọc trực tiếp
+        raw_nii = input_path
+
+    # 2. Đọc ảnh gốc
+    img_itk = sitk.ReadImage(str(raw_nii))
+    img_arr = sitk.GetArrayFromImage(img_itk).astype(np.float32) # (Z, Y, X)
+    spacing = img_itk.GetSpacing() # (X, Y, Z)
+    # nnU-Net cần properties chứa spacing theo thứ tự (Z, Y, X) nếu dùng API low-level,
+    # nhưng dùng predict_single_npy_array thì chỉ cần truyền list spacing đúng chiều image.
     
-    # Lấy spacing (X, Y, Z) và đảo ngược thành (Z, Y, X)
-    spacing = np.array(img_itk.GetSpacing())[::-1]
-    
-    properties = {
-        "sitk_stuff": None,
-        "spacing": spacing,
-        "shape_before_cropping": img_npy.shape,
-        "bbox_used_for_cropping": None 
+    # Properties cho nnU-Net (quan trọng để nó restore spacing)
+    props = {
+        'spacing': spacing[::-1], # Sitk (X,Y,Z) -> Numpy (Z,Y,X)
+        'sitk_stuff': None
     }
+
+    # ================= STAGE 1: VESSEL SEGMENTATION =================
+    # Input cho nnU-Net: (C, Z, Y, X). Với vessel model 1 kênh -> (1, Z, Y, X)
+    data_1ch = img_arr[np.newaxis, ...] 
     
-    return img_npy, properties
+    # Infer Vessel
+    # ret: (NumClass, Z, Y, X) -> Lấy argmax luôn -> (Z, Y, X)
+    vessel_pred_logits = vessel_predictor.predict_single_npy_array(
+        data_1ch, props, None, None, False
+    )
+    # vessel_pred_logits trả về numpy array (NumClasses, Z, Y, X)
+    vessel_mask = np.argmax(vessel_pred_logits, axis=0).astype(np.uint8)
 
-def get_clean_id(filename):
-    """
-    Làm sạch tên file để khớp với value trong json.
-    Ví dụ: 'iarsna_0001_0000.nii.gz' -> 'iarsna_0001'
-    """
-    name = filename
-    if name.endswith(".nii.gz"):
-        name = name[:-7]
-    elif name.endswith(".nii"):
-        name = name[:-4]
-        
-    # Bỏ suffix channel của nnU-Net (_0000)
-    if name.endswith("_0000"):
-        name = name[:-5]
-        
-    return name
-
-# ==================================================================================
-# 2. CODE CHÍNH
-# ==================================================================================
-
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("-i", "--input-dir", type=Path, required=True, help="Input directory (.nii files)")
-    p.add_argument("-o", "--output-path", type=Path, required=True, help="Output CSV path")
-    p.add_argument("-m", "--model_folder", type=Path, required=True, help="Model folder")
-    p.add_argument("-c", "--chk", type=str, required=True, help="Checkpoint name")
-    p.add_argument("--fold", type=ast.literal_eval, help="Fold tuple")
-    p.add_argument("--mapping_json", type=Path, required=True, help="Path to ids_mapping.json")
+    # ================= FEATURE ENGINEERING (CHANNEL 2) =================
+    # Quan trọng: Logic này PHẢI GIỐNG HỆT lúc bạn train aneurysm model
+    # Nếu lúc train bạn dùng Sato, thì ở đây dùng Sato.
+    # Nếu lúc train bạn dùng Distance Map (như mình khuyên), thì phải đổi sang Distance Map.
     
-    p.add_argument("--step_size", type=float, default=0.5)
-    p.add_argument("--disable_tta", action="store_true", default=False)
-    p.add_argument("--use_gaussian", action="store_true", default=False)
-    p.add_argument("--device", type=str, default="cuda")
-    p.add_argument("--viz_threshold", type=float, default=0.2, help="Threshold to save MIP")
+    # Cách A: SATO (Như code cũ của bạn) - Chậm
+    # vesselness = sato(img_arr, sigmas=range(1, 7), black_ridges=False)
+    # vesselness = np.clip(vesselness, 0, 1)
+    # channel1 = vesselness * (vessel_mask > 0)
     
-    # Whitelist filters (nếu cần lọc, truyền path csv vào đây)
-    p.add_argument("--whitelist-csv", type=Path, required=False)
+    # Cách B: DISTANCE MAP (Khuyên dùng nếu bạn đã train lại theo cách này) - Nhanh
+    if np.sum(vessel_mask) > 0:
+        dist_map = distance_transform_edt(vessel_mask > 0)
+        dist_map = dist_map / (dist_map.max() + 1e-8)
+        channel1 = dist_map * 200.0 # Scale giống lúc train
+    else:
+        channel1 = np.zeros_like(img_arr)
 
-    return p.parse_args()
+    # ================= STAGE 2: ANEURYSM DETECTION =================
+    # Input cho model 2 kênh: (2, Z, Y, X)
+    # Kênh 0: Ảnh gốc
+    # Kênh 1: Feature (Vesselness/DistanceMap)
+    data_2ch = np.stack([img_arr, channel1], axis=0)
+
+    # Infer Aneurysm
+    aneurysm_logits = aneurysm_predictor.predict_single_npy_array(
+        data_2ch, props, None, None, False
+    )
+    # aneurysm_logits: (NumClasses, Z, Y, X)
+    
+    # ================= POST PROCESSING =================
+    # Lấy xác suất lớp 1 (Aneurysm)
+    # Giả sử binary segmentation (0: bg, 1: aneurysm)
+    prob_map = torch.sigmoid(torch.from_numpy(aneurysm_logits[1])) # (Z, Y, X)
+    
+    # Lấy max probability của cả volume làm score cho case này
+    max_prob = float(prob_map.max())
+    aneurysm_present = 1 if max_prob > 0.5 else 0 # Threshold 0.5
+
+    # Lưu kết quả
+    res_row = [uid, max_prob, aneurysm_present]
+    labels = ["SeriesInstanceUID", "Probability", "Aneurysm_Present"]
+    
+    pd.DataFrame([res_row], columns=labels).to_csv(output_csv, mode='a', header=not output_csv.exists(), index=False)
+    
+    logger.info(f"Done {uid}: Max Prob = {max_prob:.4f}")
 
 
 def main():
-    args = parse_args()
-
-    # 1. Load Mapping JSON (SeriesUID <-> ShortID)
-    print(f"Dataset mapping: Loading from {args.mapping_json}...")
-    with open(args.mapping_json, 'r') as f:
-        mapping_data = json.load(f)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-i", "--input", required=True, type=Path)
+    parser.add_argument("-o", "--output-csv", type=Path, default=Path(r"E:\output_aneurysm.csv"))
     
-    # Tạo dict ngược: { "iarsna_0001": "1.2.826..." }
-    short_to_long_id = {v: k for k, v in mapping_data.items()}
-    print(f"-> Loaded {len(short_to_long_id)} mapping entries.")
-
-    # 2. Setup Output Folders
-    args.output_path.parent.mkdir(parents=True, exist_ok=True)
-    mip_dir = args.output_path.parent / (args.output_path.stem + "_heatmap_mips")
-    mip_dir.mkdir(exist_ok=True, parents=True)
-
-    # 3. Init Model
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    predictor = nnUNetPredictor(
-        tile_step_size=args.step_size,
-        use_gaussian=args.use_gaussian,
-        use_mirroring=not args.disable_tta,
-        device=device,
-        verbose=False, verbose_preprocessing=False, allow_tqdm=False,
-    )
-    predictor.initialize_from_trained_model_folder(
-        args.model_folder,
-        [i if i == "all" else int(i) for i in args.fold],
-        checkpoint_name=args.chk,
-    )
-
-    preprocessor = predictor.configuration_manager.preprocessor_class()
-    labels_dict = predictor.dataset_json["labels"]
-    labels = ["SeriesInstanceUID"] + list(labels_dict.keys())[1:] + ["Aneurysm Present"]
-    idx_to_label = {v: k for k, v in labels_dict.items() if v != 0}
-
-    # 4. Get List of NIfTI Files
-    all_files = sorted(list(args.input_dir.iterdir()))
-    series_list = [f for f in all_files if f.name.endswith(('.nii', '.nii.gz'))]
+    # Paths config
+    parser.add_argument("--vessel-model", type=Path, required=True)
+    parser.add_argument("--aneurysm-model", type=Path, required=True)
     
-    if len(series_list) == 0:
-        print(f"⚠️ Không tìm thấy file .nii/.nii.gz nào trong {args.input_dir}")
-        return
+    args = parser.parse_args()
 
-    # 5. Whitelist Logic (Optional)
-    # Nếu có whitelist, chỉ chạy những UID nằm trong whitelist
-    if args.whitelist_csv and args.whitelist_csv.exists():
-        print(f"-> Filtering using whitelist: {args.whitelist_csv}")
-        df_white = pd.read_csv(args.whitelist_csv)
-        allowed_series_uids = set(df_white["SeriesInstanceUID"].astype(str).str.strip())
-        
-        filtered_list = []
-        for f in series_list:
-            short_id = get_clean_id(f.name)
-            series_uid = short_to_long_id.get(short_id)
-            if series_uid and series_uid in allowed_series_uids:
-                filtered_list.append(f)
-        
-        print(f"-> Filtered: {len(series_list)} -> {len(filtered_list)} cases.")
-        series_list = filtered_list
-
-    # 6. Resume Logic
-    processed_uids = set()
-    if args.output_path.exists():
-        try:
-            df_done = pd.read_csv(args.output_path)
-            processed_uids = set(df_done["SeriesInstanceUID"].astype(str))
-        except: pass
+    # Lấy danh sách file
+    if args.input.is_file():
+        targets = [args.input]
     else:
-        pd.DataFrame(columns=labels).to_csv(args.output_path, index=False)
+        targets = sorted(list(args.input.glob("*.nii.gz")) + list(args.input.glob("*.nii")))
 
-    print(f"🚀 Bắt đầu Inference... (Ảnh lưu tại {mip_dir})")
+    # 1. Load Vessel Model TRƯỚC
+    logger.info("⚙️ Loading Vessel Model...")
+    vessel_predictor = get_predictor(args.vessel_model, "checkpoint_final.pth", "all") # Hoặc fold cụ thể
+    
+    # 2. Load Aneurysm Model SAU (Giữ cả 2 nếu VRAM > 12GB, nếu không phải load/unload)
+    # Để an toàn nhất: Load cả 2 nếu chạy máy mạnh. Nếu máy yếu, phải viết lại logic loop.
+    # Ở đây giả định máy có GPU ổn (RTX 3060 trở lên)
+    logger.info("⚙️ Loading Aneurysm Model...")
+    aneurysm_predictor = get_predictor(args.aneurysm_model, "checkpoint_final.pth", "all")
 
-    # =========================================================================
-    # INFERENCE LOOP
-    # =========================================================================
-    for nifti_path in tqdm(series_list):
-        # Lấy short ID từ tên file (vd: iarsna_0001)
-        short_id = get_clean_id(nifti_path.name)
-        
-        # Mapping sang Long ID (SeriesInstanceUID)
-        series_uid = short_to_long_id.get(short_id)
-        
-        if not series_uid:
-            print(f"⚠️ Warning: Không tìm thấy mapping cho file {nifti_path.name}. Bỏ qua.")
-            continue
-
-        if series_uid in processed_uids:
-            continue
-
-        try:
-            # 1. Load NIfTI (Thay vì load_and_crop)
-            img, properties = load_nifti_simple(nifti_path)
-            
-            # 2. Add channel dimension: (Z, Y, X) -> (1, Z, Y, X)
-            input_data = img[np.newaxis, ...]
-
-            # 3. Predict
-            # data: là ảnh sau khi resample/normalize (dùng để vẽ heatmap cho khớp)
-            data, _, _ = preprocessor.run_case_npy(
-                input_data, None, properties,
-                predictor.plans_manager, predictor.configuration_manager, predictor.dataset_json,
-            )
-            
-            logits = predictor.predict_logits_from_preprocessed_data(
-                torch.from_numpy(data)
-            ).cpu()
-            probs = torch.sigmoid(logits)
-
-            # 4. Max pooling & Save CSV
-            # Lưu ý: res_row dùng series_uid (Long ID)
-            max_per_c = torch.amax(probs, dim=(1, 2, 3)).to(dtype=torch.float32, device="cpu")
-            res_row = [series_uid] + max_per_c.numpy().tolist()
-            pd.DataFrame([res_row], columns=labels).to_csv(args.output_path, mode='a', header=False, index=False)
-
-            # 5. Visualization (Heatmap)
-            fg_probs = max_per_c.numpy()[1:] # Bỏ bg
-            best_prob = np.max(fg_probs) if len(fg_probs) > 0 else 0
-
-            if best_prob > args.viz_threshold:
-                best_cls_idx = np.argmax(fg_probs) + 1
-                label_name = idx_to_label.get(best_cls_idx, "Unknown")
-                
-                prob_map = probs[best_cls_idx]
-                peak_idx = torch.argmax(prob_map).item()
-                z, y, x = np.unravel_index(peak_idx, prob_map.shape)
-                
-                # Tên file ảnh output dùng SeriesUID để dễ trace
-                safe_name = label_name.replace(" ", "_").replace("/", "-")
-                png_name = f"{series_uid}_{safe_name}_p{best_prob:.2f}.png"
-                
-                # Vẽ lên data[0] (ảnh đã preprocess) để khớp tọa độ heatmap
-                save_heatmap_mip(data[0], (z, y, x), label_name, best_prob, mip_dir / png_name)
-
-        except Exception as e:
-            print(f"❌ Lỗi xử lý {nifti_path.name}: {e}")
-            continue
-
-    print(f"✅ Hoàn tất! Kết quả lưu tại: {args.output_path}")
-
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for target in tqdm(targets):
+            uid = target.name.replace(".nii.gz", "").replace(".nii", "")
+            try:
+                process_case_optimized(
+                    uid, target, args.output_csv, 
+                    vessel_predictor, aneurysm_predictor, Path(temp_dir)
+                )
+            except Exception as e:
+                logger.error(f"Error processing {uid}: {e}")
+                # Clear cache nếu lỗi OOM
+                torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     main()

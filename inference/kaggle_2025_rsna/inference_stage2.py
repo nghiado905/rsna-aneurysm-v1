@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import SimpleITK as sitk
 from tqdm import tqdm
 
@@ -58,20 +59,36 @@ class Classifier:
 
     def predict_overlay(self, overlay_path: Path):
         uid = overlay_path.name.replace(".nii.gz", "").replace(".nii", "")
-        img = sitk.GetArrayFromImage(sitk.ReadImage(str(overlay_path))).astype(np.float32)
-        img = np.flip(img, 1)  # giữ flip như train
+        
+        # 1. Đọc ảnh bằng SimpleITK để lấy metadata
+        itk_img = sitk.ReadImage(str(overlay_path))
+        
+        # 2. Lấy dữ liệu pixel
+        img = sitk.GetArrayFromImage(itk_img).astype(np.float32)
+        
+        # 3. Lấy spacing và đảo chiều (SimpleITK: X,Y,Z -> Numpy: Z,Y,X)
+        # [QUAN TRỌNG] Đây là bước fix lỗi NoneType
+        spacing = np.array(itk_img.GetSpacing())[::-1]
+        
+        # 4. Giữ nguyên logic flip của bạn (nếu model train trên ảnh flip)
+        img = np.flip(img, 1) 
+        
         input_data = img[np.newaxis, ...]
+        
+        # 5. Truyền spacing thực tế vào properties
         props = {
-            "spacing": None,
+            "spacing": spacing,  # <--- Đã sửa: Truyền mảng spacing thay vì None
             "shape_before_cropping": img.shape,
             "sitk_stuff": None
         }
+        
         data, _, _ = self.prep.run_case_npy(
             input_data, None, props,
             self.predictor.plans_manager,
             self.predictor.configuration_manager,
             self.predictor.dataset_json,
         )
+        
         logits = self.predictor.predict_logits_from_preprocessed_data(torch.from_numpy(data)).cpu()
         probs = torch.sigmoid(logits)
         max_per_c = torch.amax(probs, dim=(1, 2, 3)).float()
@@ -95,19 +112,54 @@ def main():
     ap.add_argument("--disable_tta", action="store_true", default=False)
     ap.add_argument("--use_gaussian", action="store_true", default=False)
     ap.add_argument("--device", type=str, default="cuda")
+    ap.add_argument("--num-workers", type=int, default=1, help="Số luồng song song, mỗi worker 1 predictor")
     args = ap.parse_args()
 
-    clf = Classifier(args.model_folder, args.chk, args.fold,
-                     step_size=args.step_size,
-                     use_gaussian=args.use_gaussian,
-                     disable_tta=args.disable_tta,
-                     device=args.device)
     overlays = gather_overlays(args.input)
-    rows = []
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    for ov in tqdm(overlays):
-        rows.append(clf.predict_overlay(ov))
-        pd.DataFrame(rows, columns=clf.labels).to_csv(args.output, index=False)
+
+    # Single worker
+    if args.num_workers <= 1 or len(overlays) <= 1:
+        clf = Classifier(args.model_folder, args.chk, args.fold,
+                         step_size=args.step_size,
+                         use_gaussian=args.use_gaussian,
+                         disable_tta=args.disable_tta,
+                         device=args.device)
+        rows = []
+        for ov in tqdm(overlays):
+            rows.append(clf.predict_overlay(ov))
+            pd.DataFrame(rows, columns=clf.labels).to_csv(args.output, index=False)
+    else:
+        # Multi-thread: mỗi worker 1 predictor riêng
+        def worker(chunk):
+            clf_local = Classifier(args.model_folder, args.chk, args.fold,
+                                   step_size=args.step_size,
+                                   use_gaussian=args.use_gaussian,
+                                   disable_tta=args.disable_tta,
+                                   device=args.device)
+            res = []
+            for ov in chunk:
+                res.append(clf_local.predict_overlay(ov))
+            return res
+
+        # chia chunk
+        def chunk_list(seq, n):
+            k, m = divmod(len(seq), n)
+            return [seq[i*k + min(i, m):(i+1)*k + min(i+1, m)] for i in range(n) if seq[i*k + min(i, m):(i+1)*k + min(i+1, m)]]
+
+        chunks = chunk_list(overlays, args.num_workers)
+        rows = []
+        with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
+            futures = [ex.submit(worker, c) for c in chunks]
+            for f in tqdm(as_completed(futures), total=len(futures), desc="Workers"):
+                rows.extend(f.result())
+
+        pd.DataFrame(rows, columns=Classifier(args.model_folder, args.chk, args.fold,
+                                             step_size=args.step_size,
+                                             use_gaussian=args.use_gaussian,
+                                             disable_tta=args.disable_tta,
+                                             device=args.device).labels).to_csv(args.output, index=False)
+
     print("Saved:", args.output)
 
 
