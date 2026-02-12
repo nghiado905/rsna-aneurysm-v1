@@ -183,14 +183,19 @@ def main():
         if expected_channels == 1:
             input_npy = np.array([img], dtype=np.float32)
         else:
-            vessel_logits = vessel_predictor.predict_single_npy_array(
+            vessel_seg = vessel_predictor.predict_single_npy_array(
                 np.array([img], dtype=np.float32),
                 properties,
                 None,
                 None,
                 False,
             )
-            vessel_mask = (np.argmax(vessel_logits, axis=0) > 0).astype(np.float32)
+            vessel_mask = (vessel_seg > 0).astype(np.float32)
+            if vessel_mask.shape != img.shape:
+                raise ValueError(
+                    f"Vessel mask shape {vessel_mask.shape} != image shape {img.shape}. "
+                    "Check vessel model input/preprocessing compatibility."
+                )
             input_npy = np.stack([img.astype(np.float32), vessel_mask], axis=0)
 
         data, _, _ = preprocessor.run_case_npy(
