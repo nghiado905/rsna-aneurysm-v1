@@ -9,6 +9,9 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
+from nnunetv2.inference.export_prediction import (
+    convert_predicted_logits_to_segmentation_with_correct_shape,
+)
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 
 
@@ -95,6 +98,123 @@ def extract_aneurysm_coordinates(
             }
         )
     return recs
+
+
+def _to_float(v, default=0.0):
+    try:
+        return float(v)
+    except Exception:
+        return float(default)
+
+
+def extract_aneurysm_coordinates_with_prefix(
+    probs: np.ndarray, label_names, threshold: float, prefix: str
+):
+    recs = []
+    n_labels = min(len(label_names), int(probs.shape[0]))
+    for c in range(n_labels):
+        p = probs[c]
+        max_prob = float(np.max(p))
+        max_idx = np.unravel_index(np.argmax(p), p.shape)
+        z_peak, y_peak, x_peak = [int(v) for v in max_idx]
+
+        fg = p >= threshold
+        if np.any(fg):
+            coords = np.argwhere(fg)
+            zmin, ymin, xmin = coords.min(axis=0).tolist()
+            zmax, ymax, xmax = coords.max(axis=0).tolist()
+            weights = p[fg]
+            wz, wy, wx = (coords * weights[:, None]).sum(axis=0) / np.sum(weights)
+            cz, cy, cx = int(round(float(wz))), int(round(float(wy))), int(round(float(wx)))
+            voxel_count = int(coords.shape[0])
+        else:
+            zmin = ymin = xmin = zmax = ymax = xmax = -1
+            cz, cy, cx = z_peak, y_peak, x_peak
+            voxel_count = 0
+
+        recs.append(
+            {
+                "label": label_names[c],
+                "max_prob": max_prob,
+                f"{prefix}_peak_z": z_peak,
+                f"{prefix}_peak_y": y_peak,
+                f"{prefix}_peak_x": x_peak,
+                f"{prefix}_coord_z": cz,
+                f"{prefix}_coord_y": cy,
+                f"{prefix}_coord_x": cx,
+                f"{prefix}_bbox_zmin": int(zmin),
+                f"{prefix}_bbox_zmax": int(zmax),
+                f"{prefix}_bbox_ymin": int(ymin),
+                f"{prefix}_bbox_ymax": int(ymax),
+                f"{prefix}_bbox_xmin": int(xmin),
+                f"{prefix}_bbox_xmax": int(xmax),
+                f"{prefix}_voxel_count_above_thr": voxel_count,
+            }
+        )
+    return recs
+
+
+def merge_record_dicts(base_recs, extra_recs):
+    by_label = {r["label"]: dict(r) for r in base_recs}
+    for r in extra_recs:
+        lb = r["label"]
+        if lb not in by_label:
+            by_label[lb] = dict(r)
+        else:
+            by_label[lb].update(r)
+    return [by_label[k] for k in by_label.keys()]
+
+
+def undo_to_original_voxel_and_mm(
+    rec: dict,
+    crop_shape_zyx: tuple,
+    crop_bbox_zyx,
+    spacing_zyx,
+    origin_xyz,
+    direction_flat_xyz,
+):
+    """
+    Undo path:
+    1) preprocessed probs are converted back to cropped+flip space via
+       convert_predicted_logits_to_segmentation_with_correct_shape(...)
+    2) undo flip on axis=1 (Y)
+    3) undo Stage-1 crop by adding crop bbox offsets
+    4) convert voxel (orig) to world mm (xyz)
+    """
+    z_cf = int(round(_to_float(rec.get("cropflip_coord_z", 0))))
+    y_cf = int(round(_to_float(rec.get("cropflip_coord_y", 0))))
+    x_cf = int(round(_to_float(rec.get("cropflip_coord_x", 0))))
+
+    # Step-1 already done outside (we are in cropped+flip space).
+    # Step-2 undo flip Y (axis=1).
+    y_crop = int((crop_shape_zyx[1] - 1) - y_cf)
+    z_crop = z_cf
+    x_crop = x_cf
+
+    # Step-3 undo Stage-1 crop bbox.
+    z0, _, y0, _, x0, _ = [int(v) for v in crop_bbox_zyx]
+    z_orig = int(z_crop + z0)
+    y_orig = int(y_crop + y0)
+    x_orig = int(x_crop + x0)
+
+    # Step-4 voxel(orig zyx) -> world mm xyz
+    # index for SITK-style world transform is (x,y,z) in voxel.
+    spacing_xyz = np.array([spacing_zyx[2], spacing_zyx[1], spacing_zyx[0]], dtype=np.float64)
+    idx_xyz = np.array([x_orig, y_orig, z_orig], dtype=np.float64)
+    origin_xyz = np.array(origin_xyz, dtype=np.float64)
+    direction = np.array(direction_flat_xyz, dtype=np.float64).reshape(3, 3)
+    world_xyz = origin_xyz + direction.dot(idx_xyz * spacing_xyz)
+
+    rec["coord_z_crop_unflip"] = z_crop
+    rec["coord_y_crop_unflip"] = y_crop
+    rec["coord_x_crop_unflip"] = x_crop
+    rec["coord_z_orig"] = z_orig
+    rec["coord_y_orig"] = y_orig
+    rec["coord_x_orig"] = x_orig
+    rec["coord_world_x_mm"] = float(world_xyz[0])
+    rec["coord_world_y_mm"] = float(world_xyz[1])
+    rec["coord_world_z_mm"] = float(world_xyz[2])
+    return rec
 
 
 def parse_args():
@@ -326,9 +446,7 @@ def main():
             predictor.configuration_manager,
             predictor.dataset_json,
         )
-        logits = predictor.predict_logits_from_preprocessed_data(
-            torch.from_numpy(data)
-        ).cpu()
+        logits = predictor.predict_logits_from_preprocessed_data(torch.from_numpy(data)).cpu()
         probs = torch.sigmoid(logits)
 
         max_per_c = torch.amax(probs, dim=(1, 2, 3)).to(
@@ -338,13 +456,40 @@ def main():
         row = [series_dir.name] + max_per_c.numpy().tolist()
         res.append(row)
         aneurysm_label_names = list(predictor.dataset_json["labels"].keys())[1:-1]
-        coord_recs = extract_aneurysm_coordinates(
-            probs,
+        # Coordinates in preprocessed space (after preprocessor crop+resample)
+        coord_recs = extract_aneurysm_coordinates(probs, aneurysm_label_names, threshold=args.coord_threshold)
+
+        # Convert logits back to cropped+flip image space (undo preprocessor resample+crop, but not our manual flip/stage1 crop)
+        _, probs_cropflip = convert_predicted_logits_to_segmentation_with_correct_shape(
+            logits,
+            predictor.plans_manager,
+            predictor.configuration_manager,
+            predictor.label_manager,
+            properties,
+            return_probabilities=True,
+        )
+        coord_recs_cropflip = extract_aneurysm_coordinates_with_prefix(
+            probs_cropflip,
             aneurysm_label_names,
             threshold=args.coord_threshold,
+            prefix="cropflip",
         )
+        coord_recs = merge_record_dicts(coord_recs, coord_recs_cropflip)
+
+        crop_bbox = properties.get("crop_bbox_zyx", [0, img.shape[0], 0, img.shape[1], 0, img.shape[2]])
+        spacing_zyx = properties.get("spacing", [1.0, 1.0, 1.0])
+        origin_xyz = properties.get("origin", [0.0, 0.0, 0.0])
+        direction_flat_xyz = properties.get("direction", [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
         case_id = series_to_case.get(series_dir.name, "")
         for r in coord_recs:
+            r = undo_to_original_voxel_and_mm(
+                r,
+                crop_shape_zyx=tuple(img.shape),
+                crop_bbox_zyx=crop_bbox,
+                spacing_zyx=spacing_zyx,
+                origin_xyz=origin_xyz,
+                direction_flat_xyz=direction_flat_xyz,
+            )
             r["SeriesInstanceUID"] = series_dir.name
             r["case_id"] = case_id
             coord_rows.append(r)

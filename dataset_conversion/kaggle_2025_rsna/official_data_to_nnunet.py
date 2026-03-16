@@ -8,8 +8,10 @@ import pydicom
 import argparse
 import pandas as pd
 import ast
+from datetime import datetime
 from batchgenerators.utilities.file_and_folder_operations import save_json
 from tqdm import tqdm
+import torch
 
 all_labels = [
     "Other Posterior Circulation",
@@ -27,10 +29,93 @@ all_labels = [
     "Anterior Communicating Artery",
 ]
 
-def load_and_crop(series_path: Path):
+STAGE1_TARGET_SPACING = np.array([1.0, 0.55, 0.5], dtype=np.float32)
+
+
+def log_step(msg: str):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+def init_stage1_predictor(model_training_output_dir: Path, checkpoint_name: str = "checkpoint_final.pth", fold: int = 0):
+    log_step(f"Init Stage-1 predictor | model_dir={model_training_output_dir} checkpoint={checkpoint_name} fold={fold}")
+    try:
+        from nnxnet.inference.predict_from_raw_data_2D_orthogonal_planes_fast import nnXNetPredictor
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "Cannot import nnxnet. Please install nnxnet or set PYTHONPATH to your nnXNet source before running official_data_to_nnunet.py"
+        ) from e
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    predictor = nnXNetPredictor(
+        tile_step_size=0.5,
+        use_mirroring=False,
+        use_gaussian=True,
+        perform_everything_on_device=True,
+        device=device,
+        allow_tqdm=False
+    )
+    predictor.initialize_from_trained_model_folder(
+        model_training_output_dir=str(model_training_output_dir),
+        use_folds=(fold,),
+        checkpoint_name=checkpoint_name,
+    )
+    predictor.initialize_network_and_gaussian()
+    log_step("Stage-1 predictor initialized")
+    return predictor
+
+
+def get_stage1_bbox(img_zyx: np.ndarray, image3D: sitk.Image, stage1_predictor):
+    original_spacing = np.array(image3D.GetSpacing(), dtype=np.float32)  # (x, y, z)
+    input_img_np = np.ascontiguousarray(img_zyx[None])  # [1, Z, Y, X]
+
+    with torch.no_grad():
+        z_min, z_max, y_min, y_max, x_min, x_max = stage1_predictor.predict_from_multi_axial_slices(
+            input_img_np,
+            original_spacing,
+            STAGE1_TARGET_SPACING,
+            max_batch_size=16,
+        )
+
+    # clamp to image bounds
+    z_min = int(max(0, min(z_min, img_zyx.shape[0])))
+    z_max = int(max(0, min(z_max, img_zyx.shape[0])))
+    y_min = int(max(0, min(y_min, img_zyx.shape[1])))
+    y_max = int(max(0, min(y_max, img_zyx.shape[1])))
+    x_min = int(max(0, min(x_min, img_zyx.shape[2])))
+    x_max = int(max(0, min(x_max, img_zyx.shape[2])))
+
+    if not (z_max > z_min and y_max > y_min and x_max > x_min):
+        raise RuntimeError(f"Invalid Stage-1 bbox: {(z_min, z_max, y_min, y_max, x_min, x_max)}")
+
+    return [z_min, z_max, y_min, y_max, x_min, x_max]
+
+
+def load_and_crop(
+    series_path: Path,
+    stage1_predictor=None,
+    case_id: str | None = None,
+):
+    """
+    Load a DICOM series and crop ROI.
+
+    Crop priority:
+    1) Stage-1 model bbox (if stage1_predictor is provided)
+    2) Fallback fixed-size bbox (get_bbox) when Stage-1 is unavailable/fails
+    """
     image = process_series(series_path)
     img = sitk.GetArrayFromImage(image)  # (Z, Y, X)
-    bbox = get_bbox(img, np.flip(np.array(image.GetSpacing())))
+    crop_source = "fixed_no_stage1"
+    if stage1_predictor is not None:
+        try:
+            bbox = get_stage1_bbox(img, image, stage1_predictor)
+            crop_source = "stage1"
+        except Exception as e:
+            bbox = get_bbox(img, np.flip(np.array(image.GetSpacing())))
+            crop_source = "fixed_fallback"
+            if case_id is not None:
+                log_step(f"[{case_id}] Stage-1 bbox failed ({e}), fallback fixed bbox={bbox}")
+    else:
+        bbox = get_bbox(img, np.flip(np.array(image.GetSpacing())))
 
     # apply the bounding box to the image and save it
     cropped_img = img[bbox[0] : bbox[1], bbox[2] : bbox[3], bbox[4] : bbox[5]]
@@ -38,6 +123,8 @@ def load_and_crop(series_path: Path):
         "spacing": np.flip(np.array(image.GetSpacing())),
         "direction": image.GetDirection(),
         "origin": image.GetOrigin(),
+        "crop_bbox_zyx": [int(v) for v in bbox],
+        "crop_source": crop_source,
     }
 
 
@@ -429,6 +516,7 @@ def process_id(
     mapping,
     loc_df,
     workers,
+    stage1_predictor,
 ):
     # Load series
     full_folder = series_folder / folder
@@ -439,19 +527,26 @@ def process_id(
 
     # Determine output ID
     out_id = mapping[folder]
-    outfile = imagesTr / f"{out_id}_0000.nii.gz"
+    log_step(f"Process case | series={folder} id={out_id}")
+    outfile = imagesTr / f"{out_id}_0000.nii"
     image3D, bbox = None, None
 
     # Load and process DICOM
     image3D = process_series(full_folder, n_jobs=workers)
 
-    # Save as NIfTI .nii.gz
+    # Save as NIfTI .nii
     assert folder in list(mapping.keys())
 
-    # Apply cropping
+    # Apply Stage-1 ROI cropping (replace fixed-size get_bbox)
     img3d = sitk.GetArrayFromImage(image3D).squeeze()
-    spacing = np.flip(np.array(image3D.GetSpacing()))
-    bbox = get_bbox(img=img3d, spacing=spacing)
+    try:
+        bbox = get_stage1_bbox(img3d, image3D, stage1_predictor)
+    except Exception as e:
+        print(f"[{folder}] Stage-1 bbox failed ({e}), fallback to fixed get_bbox")
+        spacing = np.flip(np.array(image3D.GetSpacing()))
+        bbox = get_bbox(img=img3d, spacing=spacing)
+
+    log_step(f"Crop bbox zyx={bbox}")
     img_crop = img3d[bbox[0] : bbox[1], bbox[2] : bbox[3], bbox[-2] : bbox[-1]]
     img_crop = np.flip(img_crop, 1)
     image_crop = sitk.GetImageFromArray(img_crop)
@@ -459,9 +554,10 @@ def process_id(
     image_crop.SetOrigin(image3D.GetOrigin())
     image_crop.SetDirection(image3D.GetDirection())
     sitk.WriteImage(image_crop, outfile)
+    log_step(f"Saved image crop: {outfile}")
 
     # Process aneurysm label file
-    out_label_file = labelsTr / f"{out_id}.nii.gz"
+    out_label_file = labelsTr / f"{out_id}.nii"
 
     # Process labels
     if not out_label_file.exists():
@@ -504,7 +600,7 @@ def process_id(
                     center = [float(axial_ind), coordinate["y"], coordinate["x"]]
 
                 label_array = create_sphere(
-                    array_shape=img.shape, center=center, radius=5, value=ind + 1
+                    array_shape=img.shape, center=center, radius=65, value=ind + 1
                 )
 
                 arrays.append(label_array)
@@ -518,7 +614,7 @@ def process_id(
             image_ref=image3D,
         )
 
-        out_image_file = labelsTr / f"{out_id}.nii.gz"
+        out_image_file = labelsTr / f"{out_id}.nii"
         out_json_file = labelsTr / f"{out_id}.json"
 
         label_img = sitk.GetArrayFromImage(label_image).squeeze()
@@ -533,9 +629,18 @@ def process_id(
 
         sitk.WriteImage(label_image, out_image_file)
         save_json(instance_dict, out_json_file)
+        log_step(f"Saved label+json: {out_image_file} | {out_json_file}")
 
 
-def main(input_folder: Path, output_folder: Path, workers: int):
+def main(
+    input_folder: Path,
+    output_folder: Path,
+    workers: int,
+    stage1_model_dir: Path,
+    stage1_checkpoint: str,
+    stage1_fold: int,
+):
+    log_step("Step 1: Validate input paths")
     label_file = input_folder / "train.csv"
     loc_file = input_folder / "train_localizers.csv"
     series_folder = input_folder / "series"
@@ -548,7 +653,9 @@ def main(input_folder: Path, output_folder: Path, workers: int):
     ), f"Folder with series '{series_folder}' does not exist."
     assert label_file.exists(), f"Label file '{label_file}' does not exist."
     assert loc_file.exists(), f"Location file '{loc_file}' does not exist."
+    assert stage1_model_dir.exists(), f"Stage-1 model dir '{stage1_model_dir}' does not exist."
 
+    log_step("Step 2: Prepare output folders")
     imagesTr = output_folder / "imagesTr"
     labelsTr = output_folder / "labelsTr"
 
@@ -558,6 +665,7 @@ def main(input_folder: Path, output_folder: Path, workers: int):
     # Iterate through series and segmentation folders
     folders = sorted(os.listdir(series_folder))
 
+    log_step("Step 3: Build ids_mapping and filtered labels")
     # Assign an "easier" ID to all series
     mapping = {
         folder: f"iarsna_{('0000' + str(i))[(-4):]}" for i, folder in enumerate(folders)
@@ -579,6 +687,15 @@ def main(input_folder: Path, output_folder: Path, workers: int):
 
     label_df.to_csv(label_out_file)
 
+    log_step("Step 4: Initialize Stage-1 ROI predictor")
+    # Initialize Stage-1 ROI predictor once
+    stage1_predictor = init_stage1_predictor(
+        model_training_output_dir=stage1_model_dir,
+        checkpoint_name=stage1_checkpoint,
+        fold=stage1_fold,
+    )
+
+    log_step("Step 5: Convert series to imagesTr/labelsTr")
     # Convert IDs in parallel, keep only IDs with label information
     valid_ids = label_df["SeriesInstanceUID"].values.astype(str).tolist()
     for valid_id in tqdm(valid_ids):
@@ -590,13 +707,15 @@ def main(input_folder: Path, output_folder: Path, workers: int):
             mapping,
             loc_df,
             workers,
+            stage1_predictor,
         )
 
+    log_step("Step 6: Write dataset.json")
     # And write the dataset.json
     dataset_json = {
         "name": output_folder.name,
         "description": "Kaggle RSNA 2025 Aneurysm Dataset",
-        "file_ending": ".nii.gz",
+        "file_ending": ".nii",
         "channel_names": {"0": "MRA+CTA+T1+T2"},
         "labels": {"background": 0, **{l: i + 1 for i, l in enumerate(all_labels)}},
         "numTraining": len(valid_ids),
@@ -605,6 +724,7 @@ def main(input_folder: Path, output_folder: Path, workers: int):
         "release": "",
     }
     save_json(dataset_json, output_folder / "dataset.json", sort_keys=False)
+    log_step("Done conversion")
 
 
 if __name__ == "__main__":
@@ -624,10 +744,31 @@ if __name__ == "__main__":
         required=True,
     )
     parser.add_argument("--np", help="Workers", type=int, default=4)
+    parser.add_argument(
+        "--stage1_model_dir",
+        help="Path to Stage-1 nnXNet model folder (nnUNetTrainer__nnUNetPlans__2d)",
+        type=Path,
+        required=True,
+    )
+    parser.add_argument(
+        "--stage1_checkpoint",
+        help="Stage-1 checkpoint filename",
+        type=str,
+        default="checkpoint_final.pth",
+    )
+    parser.add_argument(
+        "--stage1_fold",
+        help="Stage-1 fold index",
+        type=int,
+        default=0,
+    )
     args = parser.parse_args()
 
     main(
         input_folder=args.input_folder,
         output_folder=args.output_folder,
         workers=args.np,
+        stage1_model_dir=args.stage1_model_dir,
+        stage1_checkpoint=args.stage1_checkpoint,
+        stage1_fold=args.stage1_fold,
     )
