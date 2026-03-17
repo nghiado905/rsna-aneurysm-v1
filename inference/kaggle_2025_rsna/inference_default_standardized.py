@@ -409,15 +409,28 @@ def main():
         except Exception as e:
             print(f"Could not load existing coords ({e}); starting fresh.")
 
-    for series_dir in tqdm(list(args.input_dir.iterdir())):
+    series_dirs = [p for p in args.input_dir.iterdir() if p.is_dir()]
+    skipped_non_dirs = [p for p in args.input_dir.iterdir() if not p.is_dir()]
+    if skipped_non_dirs:
+        print(f"[INFO] Skipping {len(skipped_non_dirs)} non-directory entries in input dir.", flush=True)
+        for p in skipped_non_dirs[:20]:
+            print(f"[SKIP] Not a series directory: {p}", flush=True)
+
+    print(f"[INFO] Series directories to process: {len(series_dirs)}", flush=True)
+
+    for series_dir in tqdm(series_dirs):
         if series_dir.name in existing_ids:
             print(f"Already exists, skipping: {series_dir.name}")
             continue
-        img, properties = load_and_crop(
-            series_dir,
-            stage1_predictor=stage1_predictor,
-            case_id=series_dir.name,
-        )
+        try:
+            img, properties = load_and_crop(
+                series_dir,
+                stage1_predictor=stage1_predictor,
+                case_id=series_dir.name,
+            )
+        except Exception as e:
+            print(f"[ERROR] Failed to load/crop series {series_dir.name}: {e}", flush=True)
+            continue
         crop_bbox = properties.get("crop_bbox_zyx", None)
         crop_source = properties.get("crop_source", "unknown")
         print(f"[CROP] {series_dir.name} | source={crop_source} | bbox_zyx={crop_bbox}")
