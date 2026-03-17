@@ -225,6 +225,13 @@ def _read_meta_minimal(f):
     }
 
 
+def _list_dicom_files(input_folder: Path):
+    dicom_files = sorted(Path(input_folder).glob("*.dcm"))
+    if len(dicom_files) == 0:
+        dicom_files = sorted([p for p in Path(input_folder).iterdir() if p.is_file()])
+    return dicom_files
+
+
 def process_series(input_folder: Path, n_jobs=-1) -> sitk.Image:
     """
     Fast DICOM series reader using pydicom + NumPy with parallel metadata reading.
@@ -239,7 +246,12 @@ def process_series(input_folder: Path, n_jobs=-1) -> sitk.Image:
     """
 
     # 1️⃣ List all DICOM files
-    dicom_files = list(Path(input_folder).glob("*.dcm"))
+    dicom_files = _list_dicom_files(input_folder)
+    if len(dicom_files) == 0:
+        raise RuntimeError(
+            f"No DICOM files found in series folder: {input_folder}. "
+            "Expected *.dcm or regular files containing DICOM slices."
+        )
 
     if len(dicom_files) > 1:
         metas = Parallel(n_jobs=n_jobs)(

@@ -313,8 +313,8 @@ def parse_args():
     p.add_argument(
         "--stage1_model_dir",
         type=Path,
-        default=None,
-        help="Optional Stage-1 model dir. If provided, inference crop uses Stage-1 bbox.",
+        required=True,
+        help="Stage-1 model dir. Required: inference crop must use Stage-1 bbox.",
     )
     p.add_argument(
         "--stage1_checkpoint",
@@ -328,7 +328,6 @@ def parse_args():
         default=0,
         help="Stage-1 fold index for crop predictor.",
     )
-
     return p.parse_args()
 
 
@@ -348,23 +347,20 @@ def main():
     elif args.ids_mapping_json is not None:
         print(f"[WARN] ids mapping not found: {args.ids_mapping_json}")
 
-    stage1_predictor = None
-    if args.stage1_model_dir is not None:
-        if not args.stage1_model_dir.exists():
-            raise FileNotFoundError(f"Stage-1 model dir not found: {args.stage1_model_dir}")
-        if not hasattr(official_module, "init_stage1_predictor"):
-            raise AttributeError("Local official_data_to_nnunet.py has no init_stage1_predictor")
-        print(
-            f"[INFO] Init Stage-1 crop predictor | dir={args.stage1_model_dir} "
-            f"ckpt={args.stage1_checkpoint} fold={args.stage1_fold}"
-        )
-        stage1_predictor = official_module.init_stage1_predictor(
-            model_training_output_dir=args.stage1_model_dir,
-            checkpoint_name=args.stage1_checkpoint,
-            fold=args.stage1_fold,
-        )
-    else:
-        print("[WARN] stage1_model_dir is not provided. Crop will use fixed bbox fallback.")
+    if not args.stage1_model_dir.exists():
+        raise FileNotFoundError(f"Stage-1 model dir not found: {args.stage1_model_dir}")
+    if not hasattr(official_module, "init_stage1_predictor"):
+        raise AttributeError("Local official_data_to_nnunet.py has no init_stage1_predictor")
+    print(
+        f"[INFO] Init Stage-1 crop predictor | dir={args.stage1_model_dir} "
+        f"ckpt={args.stage1_checkpoint} fold={args.stage1_fold}"
+    )
+    stage1_predictor = official_module.init_stage1_predictor(
+        model_training_output_dir=args.stage1_model_dir,
+        checkpoint_name=args.stage1_checkpoint,
+        fold=args.stage1_fold,
+    )
+    print("[INFO] Stage-1 predictor ready.")
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     predictor = nnUNetPredictor(
