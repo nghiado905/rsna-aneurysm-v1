@@ -205,6 +205,11 @@ def undo_to_original_voxel_and_mm(
     direction = np.array(direction_flat_xyz, dtype=np.float64).reshape(3, 3)
     world_xyz = origin_xyz + direction.dot(idx_xyz * spacing_xyz)
 
+    # Explicit crop-space coordinates after undoing the manual Y flip.
+    rec["coord_z_crop"] = z_crop
+    rec["coord_y_crop"] = y_crop
+    rec["coord_x_crop"] = x_crop
+    # Backward-compatible alias kept for older downstream scripts.
     rec["coord_z_crop_unflip"] = z_crop
     rec["coord_y_crop_unflip"] = y_crop
     rec["coord_x_crop_unflip"] = x_crop
@@ -214,6 +219,15 @@ def undo_to_original_voxel_and_mm(
     rec["coord_world_x_mm"] = float(world_xyz[0])
     rec["coord_world_y_mm"] = float(world_xyz[1])
     rec["coord_world_z_mm"] = float(world_xyz[2])
+    rec["crop_bbox_z0"] = int(z0)
+    rec["crop_bbox_z1"] = int(crop_bbox_zyx[1])
+    rec["crop_bbox_y0"] = int(y0)
+    rec["crop_bbox_y1"] = int(crop_bbox_zyx[3])
+    rec["crop_bbox_x0"] = int(x0)
+    rec["crop_bbox_x1"] = int(crop_bbox_zyx[5])
+    rec["crop_shape_z"] = int(crop_shape_zyx[0])
+    rec["crop_shape_y"] = int(crop_shape_zyx[1])
+    rec["crop_shape_x"] = int(crop_shape_zyx[2])
     return rec
 
 
