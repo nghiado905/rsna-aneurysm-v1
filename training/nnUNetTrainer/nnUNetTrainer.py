@@ -150,6 +150,7 @@ class nnUNetTrainer(object):
         self.num_val_iterations_per_epoch = 50
         self.num_epochs = 1000
         self.current_epoch = 0
+        self.validation_every_n_epochs = 20
         self.enable_deep_supervision = True
 
         ### Dealing with labels/regions
@@ -1371,12 +1372,22 @@ class nnUNetTrainer(object):
                 train_outputs.append(self.train_step(next(self.dataloader_train)))
             self.on_train_epoch_end(train_outputs)
 
-            with torch.no_grad():
-                self.on_validation_epoch_start()
-                val_outputs = []
-                for batch_id in range(self.num_val_iterations_per_epoch):
-                    val_outputs.append(self.validation_step(next(self.dataloader_val)))
-                self.on_validation_epoch_end(val_outputs)
+            should_validate = (
+                ((epoch + 1) % self.validation_every_n_epochs == 0)
+                or (epoch == self.num_epochs - 1)
+            )
+            if should_validate:
+                with torch.no_grad():
+                    self.on_validation_epoch_start()
+                    val_outputs = []
+                    for batch_id in range(self.num_val_iterations_per_epoch):
+                        val_outputs.append(self.validation_step(next(self.dataloader_val)))
+                    self.on_validation_epoch_end(val_outputs)
+            else:
+                self.print_to_log_file(
+                    f"Skipping validation at epoch {epoch + 1}. "
+                    f"Next validation every {self.validation_every_n_epochs} epochs."
+                )
 
             self.on_epoch_end()
 
