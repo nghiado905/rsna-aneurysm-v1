@@ -904,6 +904,9 @@ class nnUNetTrainer(object):
 
         # make sure deep supervision is on in the network
         self.set_deep_supervision_enabled(self.enable_deep_supervision)
+        self.print_to_log_file(
+            f"validation_every_n_epochs={self.validation_every_n_epochs}"
+        )
 
         self.print_plans()
         empty_cache(self.device)
