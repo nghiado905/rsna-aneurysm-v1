@@ -925,13 +925,18 @@ class Kaggle2025RSNATrainer(nnUNetTrainer):
     def on_epoch_end(self):
         # --- logging ---
         self.logger.log("epoch_end_timestamps", time(), self.current_epoch)
+        train_losses = self.logger.my_fantastic_logging["train_losses"]
+        val_losses = self.logger.my_fantastic_logging["val_losses"]
+        ema_fg_dice = self.logger.my_fantastic_logging["ema_fg_dice"]
+
         self.print_to_log_file(
             "train_loss",
-            np.round(self.logger.my_fantastic_logging["train_losses"][-1], 6),
+            np.round(train_losses[-1], 6),
         )
-        self.print_to_log_file(
-            "val_loss", np.round(self.logger.my_fantastic_logging["val_losses"][-1], 6)
-        )
+        if len(val_losses) > 0:
+            self.print_to_log_file("val_loss", np.round(val_losses[-1], 6))
+        else:
+            self.print_to_log_file("val_loss", "n/a (validation skipped this epoch)")
         self.print_to_log_file(
             f"Epoch time: {np.round(self.logger.my_fantastic_logging['epoch_end_timestamps'][-1] - self.logger.my_fantastic_logging['epoch_start_timestamps'][-1], 2)} s"
         )
@@ -956,10 +961,13 @@ class Kaggle2025RSNATrainer(nnUNetTrainer):
 
         # --- 'best' checkpointing (lower is better per your comment) ---
         if (
-            self._best_ema is None
-            or self.logger.my_fantastic_logging["ema_fg_dice"][-1] < self._best_ema
+            len(ema_fg_dice) > 0
+            and (
+                self._best_ema is None
+                or ema_fg_dice[-1] < self._best_ema
+            )
         ):
-            self._best_ema = self.logger.my_fantastic_logging["ema_fg_dice"][-1]
+            self._best_ema = ema_fg_dice[-1]
             if self.local_rank == 0:
                 self.print_to_log_file(
                     f"Yayy! New best EMA loss: {np.round(self._best_ema, 4)}"
