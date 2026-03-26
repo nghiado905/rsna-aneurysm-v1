@@ -1,0 +1,83 @@
+﻿SeriesInstanceUID,Actual_Labels,Pred_Aneurysm_Prob,Pred_Label,Pred_Label_Prob,MatchFlag,Note
+1.2.826.0.1.3680043.8.498.10004044428023505108375152878107656647,Negative (No Aneurysm),0.1088,Right Infraclinoid Internal Carotid Artery,0.0646,0,Negative Case
+1.2.826.0.1.3680043.8.498.10004684224894397679901841656954650085,Negative (No Aneurysm),0.0300,Anterior Communicating Artery,0.0050,0,Negative Case
+1.2.826.0.1.3680043.8.498.10009383108068795488741533244914370182,Negative (No Aneurysm),0.1520,Other Posterior Circulation,0.0559,0,Negative Case
+1.2.826.0.1.3680043.8.498.10012790035410518400400834395242853657,Negative (No Aneurysm),0.6978,Left Middle Cerebral Artery,0.7603,0,Negative Case
+1.2.826.0.1.3680043.8.498.10014757658335054766479957992112625961,Negative (No Aneurysm),0.5894,Left Posterior Communicating Artery,0.5503,0,Negative Case
+1.2.826.0.1.3680043.8.498.10021411248005513321236647460239137906,Negative (No Aneurysm),0.5005,Anterior Communicating Artery,0.2346,0,Negative Case
+1.2.826.0.1.3680043.8.498.10098743283291956051221530305664415374,"Left Anterior Cerebral Artery, Aneurysm Present",0.6626,Left Anterior Cerebral Artery,0.6992,1,Location Match
+1.2.826.0.1.3680043.8.498.10355999422630119489122900651916543784,"Left Anterior Cerebral Artery, Aneurysm Present",0.7007,Left Anterior Cerebral Artery,0.6797,1,Location Match
+1.2.826.0.1.3680043.8.498.10460650254877169551212749749635286489,"Right Middle Cerebral Artery, Aneurysm Present",0.6821,Right Middle Cerebral Artery,0.7031,1,Location Match
+1.2.826.0.1.3680043.8.498.10524676737221213850435436390475501565,"Right Middle Cerebral Artery, Aneurysm Present",0.0665,Other Posterior Circulation,0.0141,0,Mismatch
+1.2.826.0.1.3680043.8.498.10529765847929106412191039087455506757,"Right Middle Cerebral Artery, Aneurysm Present",0.7329,Right Middle Cerebral Artery,0.7563,1,Location Match
+1.2.826.0.1.3680043.8.498.10540586847553109495238524904638776495,"Right Middle Cerebral Artery, Aneurysm Present",0.5918,Right Supraclinoid Internal Carotid Artery,0.5923,0,Mismatch
+1.2.826.0.1.3680043.8.498.10595241703564671248403930084633580071,"Right Middle Cerebral Artery, Aneurysm Present",0.5273,Right Middle Cerebral Artery,0.4985,1,Location Match
+1.2.826.0.1.3680043.8.498.10602156717395509282545203380100998253,"Right Middle Cerebral Artery, Left Anterior Cerebral Artery, Aneurysm Present",0.7329,Left Anterior Cerebral Artery,0.7480,1,Location Match
+1.2.826.0.1.3680043.8.498.10676171200316720058659073183033256880,"Right Middle Cerebral Artery, Aneurysm Present",0.7412,Right Middle Cerebral Artery,0.7534,1,Location Match
+1.2.826.0.1.3680043.8.498.10743276162988333459718604675735499462,"Left Anterior Cerebral Artery, Aneurysm Present",0.7251,Left Anterior Cerebral Artery,0.7568,1,Location Match
+1.2.826.0.1.3680043.8.498.10843288560910004558081082597234683103,"Left Anterior Cerebral Artery, Aneurysm Present",0.7373,Left Anterior Cerebral Artery,0.7251,1,Location Match
+1.2.826.0.1.3680043.8.498.10934247501385122444418879317492730564,"Left Supraclinoid Internal Carotid Artery, Aneurysm Present",0.3750,Left Supraclinoid Internal Carotid Artery,0.1353,1,Location Match
+1.2.826.0.1.3680043.8.498.10983873469527502146507427860324376387,"Left Supraclinoid Internal Carotid Artery, Aneurysm Present",0.6875,Right Supraclinoid Internal Carotid Artery,0.7583,0,Mismatch
+1.2.826.0.1.3680043.8.498.11024186785729776851960279299394139142,"Left Supraclinoid Internal Carotid Artery, Aneurysm Present",0.1609,Left Supraclinoid Internal Carotid Artery,0.0446,1,Location Match
+1.2.826.0.1.3680043.8.498.11038636852681039246443401046449812061,"Left Supraclinoid Internal Carotid Artery, Aneurysm Present",0.6865,Left Supraclinoid Internal Carotid Artery,0.7495,1,Location Match
+1.2.826.0.1.3680043.8.498.11079102674589284483149404820469555321,"Left Supraclinoid Internal Carotid Artery, Aneurysm Present",0.0812,Left Posterior Communicating Artery,0.0154,0,Mismatch
+1.2.826.0.1.3680043.8.498.11114613141735642199606043212646844886,"Left Supraclinoid Internal Carotid Artery, Aneurysm Present",0.0955,Right Supraclinoid Internal Carotid Artery,0.0119,0,Mismatch
+1.2.826.0.1.3680043.8.498.11800291018082360193765760987155392731,"Anterior Communicating Artery, Aneurysm Present",0.6924,Anterior Communicating Artery,0.4727,1,Location Match
+1.2.826.0.1.3680043.8.498.11814351750282876670979685375515221520,"Anterior Communicating Artery, Aneurysm Present",0.7104,Anterior Communicating Artery,0.6675,1,Location Match
+1.2.826.0.1.3680043.8.498.11868387530571815367138217323572660585,"Anterior Communicating Artery, Aneurysm Present",0.7056,Anterior Communicating Artery,0.5312,1,Location Match
+1.2.826.0.1.3680043.8.498.11887329867812275491160566603814454129,"Anterior Communicating Artery, Aneurysm Present",0.0883,Right Posterior Communicating Artery,0.0150,0,Mismatch
+1.2.826.0.1.3680043.8.498.11891384661160041525105783578394676695,"Anterior Communicating Artery, Aneurysm Present",0.6797,Left Middle Cerebral Artery,0.7437,0,Mismatch
+1.2.826.0.1.3680043.8.498.11926308270282742005166523863172452257,"Anterior Communicating Artery, Aneurysm Present",0.2544,Left Infraclinoid Internal Carotid Artery,0.0280,0,Mismatch
+1.2.826.0.1.3680043.8.498.11934212867647157255137395083603553717,"Right Supraclinoid Internal Carotid Artery, Aneurysm Present",0.2339,Right Supraclinoid Internal Carotid Artery,0.0817,1,Location Match
+1.2.826.0.1.3680043.8.498.11940368429225231906526358808924714901,"Right Supraclinoid Internal Carotid Artery, Aneurysm Present",0.6704,Right Supraclinoid Internal Carotid Artery,0.6655,1,Location Match
+1.2.826.0.1.3680043.8.498.11965648008409913592789171016550679794,"Right Supraclinoid Internal Carotid Artery, Aneurysm Present",0.6733,Anterior Communicating Artery,0.6313,0,Mismatch
+1.2.826.0.1.3680043.8.498.11973223775938034504881778923404981232,"Right Supraclinoid Internal Carotid Artery, Aneurysm Present",0.6587,Right Supraclinoid Internal Carotid Artery,0.6479,1,Location Match
+1.2.826.0.1.3680043.8.498.11984872093464483631413281529270704058,"Right Supraclinoid Internal Carotid Artery, Aneurysm Present",0.7065,Right Supraclinoid Internal Carotid Artery,0.7754,1,Location Match
+1.2.826.0.1.3680043.8.498.12132622846836853200891705613461466627,"Right Supraclinoid Internal Carotid Artery, Aneurysm Present",0.6836,Right Supraclinoid Internal Carotid Artery,0.5366,1,Location Match
+1.2.826.0.1.3680043.8.498.12996484432894806398582882906813843196,"Left Middle Cerebral Artery, Aneurysm Present",0.6870,Left Middle Cerebral Artery,0.7192,1,Location Match
+1.2.826.0.1.3680043.8.498.13001629435974764211403087597568806527,"Left Middle Cerebral Artery, Aneurysm Present",0.5205,Left Supraclinoid Internal Carotid Artery,0.3809,0,Mismatch
+1.2.826.0.1.3680043.8.498.13011719526079081995370478235393393062,"Left Middle Cerebral Artery, Aneurysm Present",0.6987,Left Middle Cerebral Artery,0.7593,1,Location Match
+1.2.826.0.1.3680043.8.498.13016287603897726863314615073473589227,"Left Middle Cerebral Artery, Aneurysm Present",0.6890,Left Middle Cerebral Artery,0.7402,1,Location Match
+1.2.826.0.1.3680043.8.498.13016754871983714150939202322730205882,"Left Middle Cerebral Artery, Aneurysm Present",0.1924,Anterior Communicating Artery,0.0449,0,Mismatch
+1.2.826.0.1.3680043.8.498.13148061222112408936908228902267474585,"Left Middle Cerebral Artery, Aneurysm Present",0.6670,Left Middle Cerebral Artery,0.7007,1,Location Match
+1.2.826.0.1.3680043.8.498.42986083907329271828625264464371205932,"Basilar Tip, Aneurysm Present",0.7339,Basilar Tip,0.7900,1,Location Match
+1.2.826.0.1.3680043.8.498.47224954818258018398557128567835568484,"Basilar Tip, Aneurysm Present",0.7251,Basilar Tip,0.7681,1,Location Match
+1.2.826.0.1.3680043.8.498.48062207595556588361135453911773798345,"Basilar Tip, Aneurysm Present",0.7139,Basilar Tip,0.6953,1,Location Match
+1.2.826.0.1.3680043.8.498.48131866374867671121851712076545426103,"Basilar Tip, Aneurysm Present",0.7212,Basilar Tip,0.7271,1,Location Match
+1.2.826.0.1.3680043.8.498.48475183315704747033377720148723313443,"Basilar Tip, Aneurysm Present",0.7349,Basilar Tip,0.7134,1,Location Match
+1.2.826.0.1.3680043.8.498.49640345168968922611291772802640560828,"Basilar Tip, Aneurysm Present",0.4470,Basilar Tip,0.3840,1,Location Match
+1.2.826.0.1.3680043.8.498.50462346896825686194809696037436442493,"Right Posterior Communicating Artery, Aneurysm Present",0.5283,Right Supraclinoid Internal Carotid Artery,0.3040,0,Mismatch
+1.2.826.0.1.3680043.8.498.52955365444529532924845458080934418563,"Right Infraclinoid Internal Carotid Artery, Aneurysm Present",0.7100,Right Infraclinoid Internal Carotid Artery,0.8086,1,Location Match
+1.2.826.0.1.3680043.8.498.53104352447810651776840045554881882712,"Right Posterior Communicating Artery, Aneurysm Present",0.6758,Right Posterior Communicating Artery,0.6543,1,Location Match
+1.2.826.0.1.3680043.8.498.53765828347047740949708716217765934756,"Other Posterior Circulation, Aneurysm Present",0.5317,Other Posterior Circulation,0.5190,1,Location Match
+1.2.826.0.1.3680043.8.498.55318153291426426904172016564090080444,"Other Posterior Circulation, Aneurysm Present",0.4165,Other Posterior Circulation,0.4375,1,Location Match
+1.2.826.0.1.3680043.8.498.56110291851048020997480352359185668962,"Right Infraclinoid Internal Carotid Artery, Aneurysm Present",0.6426,Right Infraclinoid Internal Carotid Artery,0.4729,1,Location Match
+1.2.826.0.1.3680043.8.498.56726390254369861610098885035038644698,"Right Infraclinoid Internal Carotid Artery, Aneurysm Present",0.1827,Left Posterior Communicating Artery,0.0470,0,Mismatch
+1.2.826.0.1.3680043.8.498.56964038810871813533180359931384508796,"Right Infraclinoid Internal Carotid Artery, Aneurysm Present",0.6426,Left Infraclinoid Internal Carotid Artery,0.6260,0,Mismatch
+1.2.826.0.1.3680043.8.498.57397677856362635968041345746567057331,"Other Posterior Circulation, Aneurysm Present",0.0418,Right Middle Cerebral Artery,0.0146,0,Mismatch
+1.2.826.0.1.3680043.8.498.57883860342392736513386007854621904708,"Right Posterior Communicating Artery, Aneurysm Present",0.7007,Right Posterior Communicating Artery,0.7510,1,Location Match
+1.2.826.0.1.3680043.8.498.58091547531405967521379664996324707473,"Right Posterior Communicating Artery, Aneurysm Present",0.6899,Right Posterior Communicating Artery,0.7271,1,Location Match
+1.2.826.0.1.3680043.8.498.58839417089022860359638460482101293080,"Other Posterior Circulation, Aneurysm Present",0.7422,Other Posterior Circulation,0.7559,1,Location Match
+1.2.826.0.1.3680043.8.498.60267505498722587333948924217885727793,"Right Posterior Communicating Artery, Aneurysm Present",0.7046,Right Posterior Communicating Artery,0.7632,1,Location Match
+1.2.826.0.1.3680043.8.498.60432141969017867403150622366080165866,"Other Posterior Circulation, Aneurysm Present",0.7373,Other Posterior Circulation,0.7939,1,Location Match
+1.2.826.0.1.3680043.8.498.60944529209040010535082652723261079582,"Other Posterior Circulation, Aneurysm Present",0.4031,Right Posterior Communicating Artery,0.1447,0,Mismatch
+1.2.826.0.1.3680043.8.498.61335105464179422254708476756567138833,"Right Posterior Communicating Artery, Aneurysm Present",0.6333,Right Posterior Communicating Artery,0.6699,1,Location Match
+1.2.826.0.1.3680043.8.498.61601885460542831034378226512645750417,"Right Infraclinoid Internal Carotid Artery, Aneurysm Present",0.1182,Right Infraclinoid Internal Carotid Artery,0.0393,1,Location Match
+1.2.826.0.1.3680043.8.498.63285114435969886542201293844266820916,"Right Infraclinoid Internal Carotid Artery, Aneurysm Present",0.6270,Right Infraclinoid Internal Carotid Artery,0.6929,1,Location Match
+1.2.826.0.1.3680043.8.498.63287502406233564442417269409569434337,"Left Posterior Communicating Artery, Aneurysm Present",0.6001,Left Supraclinoid Internal Carotid Artery,0.5908,0,Mismatch
+1.2.826.0.1.3680043.8.498.66341469849558089736451534296312923277,"Left Posterior Communicating Artery, Aneurysm Present",0.5840,Left Supraclinoid Internal Carotid Artery,0.4019,0,Mismatch
+1.2.826.0.1.3680043.8.498.67479012339596247743014757155106125450,"Left Posterior Communicating Artery, Aneurysm Present",0.7397,Left Posterior Communicating Artery,0.7090,1,Location Match
+1.2.826.0.1.3680043.8.498.75185517449706240458416815330670184056,"Left Posterior Communicating Artery, Aneurysm Present",0.6924,Left Posterior Communicating Artery,0.6265,1,Location Match
+1.2.826.0.1.3680043.8.498.77463880288072958522969124231977574591,"Left Infraclinoid Internal Carotid Artery, Aneurysm Present",0.6704,Left Infraclinoid Internal Carotid Artery,0.5605,1,Location Match
+1.2.826.0.1.3680043.8.498.77936958068234576178642195669218963872,"Left Posterior Communicating Artery, Aneurysm Present",0.7129,Left Posterior Communicating Artery,0.7148,1,Location Match
+1.2.826.0.1.3680043.8.498.78620281895000331794078312421735034543,"Left Posterior Communicating Artery, Aneurysm Present",0.7080,Left Posterior Communicating Artery,0.7007,1,Location Match
+1.2.826.0.1.3680043.8.498.80817331588200438314263296437151025460,"Left Infraclinoid Internal Carotid Artery, Aneurysm Present",0.7085,Left Infraclinoid Internal Carotid Artery,0.7256,1,Location Match
+1.2.826.0.1.3680043.8.498.81805829917770672136502152837147205014,"Left Infraclinoid Internal Carotid Artery, Aneurysm Present",0.6284,Left Infraclinoid Internal Carotid Artery,0.3188,1,Location Match
+1.2.826.0.1.3680043.8.498.85068754313761506487639931357231686739,"Left Infraclinoid Internal Carotid Artery, Aneurysm Present",0.6538,Left Infraclinoid Internal Carotid Artery,0.6392,1,Location Match
+1.2.826.0.1.3680043.8.498.86143541773119753858692849029621494411,"Left Infraclinoid Internal Carotid Artery, Aneurysm Present",0.6045,Left Infraclinoid Internal Carotid Artery,0.5601,1,Location Match
+1.2.826.0.1.3680043.8.498.86738851244916630398579781113619279737,"Left Infraclinoid Internal Carotid Artery, Aneurysm Present",0.7114,Left Infraclinoid Internal Carotid Artery,0.7173,1,Location Match
+1.2.826.0.1.3680043.8.498.88398083689128030874944560965416678850,"Right Anterior Cerebral Artery, Aneurysm Present",0.4746,Right Anterior Cerebral Artery,0.3108,1,Location Match
+1.2.826.0.1.3680043.8.498.88739296218460643753583291722714541935,"Right Anterior Cerebral Artery, Aneurysm Present",0.1556,Right Anterior Cerebral Artery,0.0468,1,Location Match
+1.2.826.0.1.3680043.8.498.92295398812342611950640685935279065696,"Right Anterior Cerebral Artery, Aneurysm Present",0.7222,Right Anterior Cerebral Artery,0.7437,1,Location Match
+1.2.826.0.1.3680043.8.498.96483205733840964767784474243439555793,"Right Anterior Cerebral Artery, Aneurysm Present",0.2896,Right Anterior Cerebral Artery,0.1043,1,Location Match
+1.2.826.0.1.3680043.8.498.98638780636952984282720678491674862364,"Right Anterior Cerebral Artery, Aneurysm Present",0.3171,Right Anterior Cerebral Artery,0.1359,1,Location Match

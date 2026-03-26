@@ -448,7 +448,6 @@ def main():
         crop_bbox = properties.get("crop_bbox_zyx", None)
         crop_source = properties.get("crop_source", "unknown")
         print(f"[CROP] {series_dir.name} | source={crop_source} | bbox_zyx={crop_bbox}")
-        img = np.flip(img, 1)
         input_data = np.array([img], dtype=np.float32)
         if expected_channels > input_data.shape[0]:
             n_missing = expected_channels - input_data.shape[0]

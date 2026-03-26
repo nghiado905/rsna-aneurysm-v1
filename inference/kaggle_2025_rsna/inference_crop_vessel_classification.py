@@ -440,7 +440,6 @@ def main():
         crop_source = properties.get("crop_source", "unknown")
         print(f"[CROP] {series_dir.name} | source={crop_source} | bbox_zyx={crop_bbox}")
 
-        img = np.flip(img, 1).astype(np.float32, copy=False)
         modality, vessel_predictor = get_vessel_predictor_for_series(series_dir)
         vessel_expected_channels = max(1, len(vessel_predictor.dataset_json.get("channel_names", {})))
         vessel_seg, vessel_probs = _predict_seg_and_probs(img, properties, vessel_predictor, vessel_expected_channels)
