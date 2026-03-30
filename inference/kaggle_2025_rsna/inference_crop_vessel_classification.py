@@ -432,6 +432,8 @@ def main():
                 stage1_predictor=stage1_predictor,
                 case_id=series_dir.name,
             )
+            # Training data was saved after flipping crop along Y axis.
+            img = np.flip(img, 1).astype(np.float32, copy=False)
         except Exception as e:
             print(f"[ERROR] Failed to load/crop series {series_dir.name}: {e}", flush=True)
             continue

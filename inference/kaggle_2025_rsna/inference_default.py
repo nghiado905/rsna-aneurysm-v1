@@ -266,6 +266,8 @@ def main():
             continue
 
         img, properties = load_and_crop(series_dir)
+        # Training data was saved after flipping crop along Y axis.
+        img = np.flip(img, 1).astype(np.float32, copy=False)
         data, _, _ = preprocessor.run_case_npy(
             np.array([img], dtype=np.float32),
             None,

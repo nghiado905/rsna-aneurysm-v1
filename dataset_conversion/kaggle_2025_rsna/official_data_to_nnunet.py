@@ -36,8 +36,28 @@ def log_step(msg: str):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
 
-def init_stage1_predictor(model_training_output_dir: Path, checkpoint_name: str = "checkpoint_final.pth", fold: int = 0):
-    log_step(f"Init Stage-1 predictor | model_dir={model_training_output_dir} checkpoint={checkpoint_name} fold={fold}")
+def log_shape(case_id: str, name: str, array: np.ndarray | None = None, image: sitk.Image | None = None):
+    parts = [f"[{case_id}] {name}"]
+    if array is not None:
+        parts.append(f"np.shape={tuple(int(x) for x in array.shape)}")
+        parts.append(f"np.dtype={array.dtype}")
+    if image is not None:
+        parts.append(f"sitk.size={tuple(int(x) for x in image.GetSize())}")
+        parts.append(f"sitk.spacing={tuple(float(x) for x in image.GetSpacing())}")
+        parts.append(f"sitk.origin={tuple(float(x) for x in image.GetOrigin())}")
+    log_step(" | ".join(parts))
+
+
+def init_stage1_predictor(
+    model_training_output_dir: Path,
+    checkpoint_name: str = "checkpoint_final.pth",
+    fold: int = 0,
+    device_str: str = "auto",
+):
+    log_step(
+        f"Init Stage-1 predictor | model_dir={model_training_output_dir} "
+        f"checkpoint={checkpoint_name} fold={fold} device={device_str}"
+    )
     try:
         from nnxnet.inference.predict_from_raw_data_2D_orthogonal_planes_fast import nnXNetPredictor
     except ModuleNotFoundError as e:
@@ -45,7 +65,23 @@ def init_stage1_predictor(model_training_output_dir: Path, checkpoint_name: str 
             "Cannot import nnxnet. Please install nnxnet or set PYTHONPATH to your nnXNet source before running official_data_to_nnunet.py"
         ) from e
 
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    if device_str == "auto":
+        resolved_device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    else:
+        resolved_device = device_str
+        if resolved_device.startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested but torch.cuda.is_available() is False")
+    device = torch.device(resolved_device)
+    log_step(
+        f"Stage-1 device resolved | requested={device_str} resolved={device} "
+        f"cuda_available={torch.cuda.is_available()} "
+        f"cuda_device_count={torch.cuda.device_count()}"
+    )
+    if device.type == "cuda":
+        log_step(
+            f"CUDA device info | index={device.index} "
+            f"name={torch.cuda.get_device_name(device)}"
+        )
     predictor = nnXNetPredictor(
         tile_step_size=0.5,
         use_mirroring=False,
@@ -545,12 +581,14 @@ def process_id(
 
     # Load and process DICOM
     image3D = process_series(full_folder, n_jobs=workers)
+    log_shape(folder, "raw_image3D", image=image3D)
 
     # Save as NIfTI .nii
     assert folder in list(mapping.keys())
 
     # Apply Stage-1 ROI cropping (replace fixed-size get_bbox)
     img3d = sitk.GetArrayFromImage(image3D).squeeze()
+    log_shape(folder, "raw_image_np_zyx", array=img3d)
     try:
         bbox = get_stage1_bbox(img3d, image3D, stage1_predictor)
     except Exception as e:
@@ -560,11 +598,14 @@ def process_id(
 
     log_step(f"Crop bbox zyx={bbox}")
     img_crop = img3d[bbox[0] : bbox[1], bbox[2] : bbox[3], bbox[-2] : bbox[-1]]
+    log_shape(folder, "img_crop_before_flip_zyx", array=img_crop)
     img_crop = np.flip(img_crop, 1)
+    log_shape(folder, "img_crop_after_flip_zyx", array=img_crop)
     image_crop = sitk.GetImageFromArray(img_crop)
     image_crop.SetSpacing(image3D.GetSpacing())
     image_crop.SetOrigin(image3D.GetOrigin())
     image_crop.SetDirection(image3D.GetDirection())
+    log_shape(folder, "image_crop_sitk", image=image_crop)
     sitk.WriteImage(image_crop, outfile)
     log_step(f"Saved image crop: {outfile}")
 
@@ -630,14 +671,24 @@ def process_id(
         out_json_file = labelsTr / f"{out_id}.json"
 
         label_img = sitk.GetArrayFromImage(label_image).squeeze()
+        log_shape(folder, "label_full_np_zyx", array=label_img)
         label_img_crop = label_img[
             bbox[0] : bbox[1], bbox[2] : bbox[3], bbox[-2] : bbox[-1]
         ]
+        log_shape(folder, "label_crop_before_flip_zyx", array=label_img_crop)
         label_img_crop = np.flip(label_img_crop, 1)
+        log_shape(folder, "label_crop_after_flip_zyx", array=label_img_crop)
+        shape_match = tuple(img_crop.shape) == tuple(label_img_crop.shape)
+        log_step(
+            f"[{folder}] crop_match image_vs_label={shape_match} "
+            f"image_shape={tuple(int(x) for x in img_crop.shape)} "
+            f"label_shape={tuple(int(x) for x in label_img_crop.shape)}"
+        )
         label_image = sitk.GetImageFromArray(label_img_crop)
         label_image.SetSpacing(image3D.GetSpacing())
         label_image.SetOrigin(image3D.GetOrigin())
         label_image.SetDirection(image3D.GetDirection())
+        log_shape(folder, "label_crop_sitk", image=label_image)
 
         sitk.WriteImage(label_image, out_image_file)
         save_json(instance_dict, out_json_file)
@@ -651,6 +702,7 @@ def main(
     stage1_model_dir: Path,
     stage1_checkpoint: str,
     stage1_fold: int,
+    device: str,
 ):
     log_step("Step 1: Validate input paths")
     label_file = input_folder / "train.csv"
@@ -705,6 +757,7 @@ def main(
         model_training_output_dir=stage1_model_dir,
         checkpoint_name=stage1_checkpoint,
         fold=stage1_fold,
+        device_str=device,
     )
 
     log_step("Step 5: Convert series to imagesTr/labelsTr")
@@ -774,6 +827,12 @@ if __name__ == "__main__":
         type=int,
         default=0,
     )
+    parser.add_argument(
+        "--device",
+        help="Device for Stage-1 inference: auto, cpu, cuda, cuda:0, ...",
+        type=str,
+        default="auto",
+    )
     args = parser.parse_args()
 
     main(
@@ -783,4 +842,5 @@ if __name__ == "__main__":
         stage1_model_dir=args.stage1_model_dir,
         stage1_checkpoint=args.stage1_checkpoint,
         stage1_fold=args.stage1_fold,
+        device=args.device,
     )

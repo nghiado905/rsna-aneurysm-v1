@@ -500,7 +500,7 @@ def process_id(
                     center = [float(axial_ind), coordinate["y"], coordinate["x"]]
 
                 label_array = create_sphere(
-                    array_shape=img.shape, center=center, radius=5, value=ind + 1
+                    array_shape=img.shape, center=center, radius=65, value=ind + 1
                 )
 
                 arrays.append(label_array)
