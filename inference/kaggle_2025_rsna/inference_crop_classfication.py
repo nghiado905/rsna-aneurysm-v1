@@ -165,8 +165,10 @@ def merge_record_dicts(base_recs, extra_recs):
     return [by_label[k] for k in by_label.keys()]
 
 
-def undo_to_original_voxel_and_mm(
+def _write_coord_transform(
     rec: dict,
+    source_prefix: str,
+    output_prefix: str,
     crop_shape_zyx: tuple,
     crop_bbox_zyx,
     spacing_zyx,
@@ -181,9 +183,9 @@ def undo_to_original_voxel_and_mm(
     3) undo Stage-1 crop by adding crop bbox offsets
     4) convert voxel (orig) to world mm (xyz)
     """
-    z_cf = int(round(_to_float(rec.get("cropflip_coord_z", 0))))
-    y_cf = int(round(_to_float(rec.get("cropflip_coord_y", 0))))
-    x_cf = int(round(_to_float(rec.get("cropflip_coord_x", 0))))
+    z_cf = int(round(_to_float(rec.get(f"{source_prefix}_coord_z", 0))))
+    y_cf = int(round(_to_float(rec.get(f"{source_prefix}_coord_y", 0))))
+    x_cf = int(round(_to_float(rec.get(f"{source_prefix}_coord_x", 0))))
 
     # Step-1 already done outside (we are in cropped+flip space).
     # Step-2 undo flip Y (axis=1).
@@ -206,19 +208,18 @@ def undo_to_original_voxel_and_mm(
     world_xyz = origin_xyz + direction.dot(idx_xyz * spacing_xyz)
 
     # Explicit crop-space coordinates after undoing the manual Y flip.
-    rec["coord_z_crop"] = z_crop
-    rec["coord_y_crop"] = y_crop
-    rec["coord_x_crop"] = x_crop
-    # Backward-compatible alias kept for older downstream scripts.
-    rec["coord_z_crop_unflip"] = z_crop
-    rec["coord_y_crop_unflip"] = y_crop
-    rec["coord_x_crop_unflip"] = x_crop
-    rec["coord_z_orig"] = z_orig
-    rec["coord_y_orig"] = y_orig
-    rec["coord_x_orig"] = x_orig
-    rec["coord_world_x_mm"] = float(world_xyz[0])
-    rec["coord_world_y_mm"] = float(world_xyz[1])
-    rec["coord_world_z_mm"] = float(world_xyz[2])
+    rec[f"{output_prefix}_z_crop"] = z_crop
+    rec[f"{output_prefix}_y_crop"] = y_crop
+    rec[f"{output_prefix}_x_crop"] = x_crop
+    rec[f"{output_prefix}_z_crop_unflip"] = z_crop
+    rec[f"{output_prefix}_y_crop_unflip"] = y_crop
+    rec[f"{output_prefix}_x_crop_unflip"] = x_crop
+    rec[f"{output_prefix}_z_orig"] = z_orig
+    rec[f"{output_prefix}_y_orig"] = y_orig
+    rec[f"{output_prefix}_x_orig"] = x_orig
+    rec[f"{output_prefix}_world_x_mm"] = float(world_xyz[0])
+    rec[f"{output_prefix}_world_y_mm"] = float(world_xyz[1])
+    rec[f"{output_prefix}_world_z_mm"] = float(world_xyz[2])
     rec["crop_bbox_z0"] = int(z0)
     rec["crop_bbox_z1"] = int(crop_bbox_zyx[1])
     rec["crop_bbox_y0"] = int(y0)
@@ -228,6 +229,37 @@ def undo_to_original_voxel_and_mm(
     rec["crop_shape_z"] = int(crop_shape_zyx[0])
     rec["crop_shape_y"] = int(crop_shape_zyx[1])
     rec["crop_shape_x"] = int(crop_shape_zyx[2])
+    return rec
+
+
+def undo_to_original_voxel_and_mm(
+    rec: dict,
+    crop_shape_zyx: tuple,
+    crop_bbox_zyx,
+    spacing_zyx,
+    origin_xyz,
+    direction_flat_xyz,
+):
+    rec = _write_coord_transform(
+        rec,
+        source_prefix="cropflip",
+        output_prefix="coord",
+        crop_shape_zyx=crop_shape_zyx,
+        crop_bbox_zyx=crop_bbox_zyx,
+        spacing_zyx=spacing_zyx,
+        origin_xyz=origin_xyz,
+        direction_flat_xyz=direction_flat_xyz,
+    )
+    rec = _write_coord_transform(
+        rec,
+        source_prefix="cropflip_peak",
+        output_prefix="peak",
+        crop_shape_zyx=crop_shape_zyx,
+        crop_bbox_zyx=crop_bbox_zyx,
+        spacing_zyx=spacing_zyx,
+        origin_xyz=origin_xyz,
+        direction_flat_xyz=direction_flat_xyz,
+    )
     return rec
 
 
