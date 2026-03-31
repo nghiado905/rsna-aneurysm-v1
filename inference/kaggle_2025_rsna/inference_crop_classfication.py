@@ -107,6 +107,14 @@ def _to_float(v, default=0.0):
         return float(default)
 
 
+def _get_source_axis_value(rec: dict, source_prefix: str, axis: str) -> float:
+    direct_key = f"{source_prefix}_{axis}"
+    coord_key = f"{source_prefix}_coord_{axis}"
+    if direct_key in rec:
+        return _to_float(rec.get(direct_key, 0))
+    return _to_float(rec.get(coord_key, 0))
+
+
 def extract_aneurysm_coordinates_with_prefix(
     probs: np.ndarray, label_names, threshold: float, prefix: str
 ):
@@ -183,9 +191,9 @@ def _write_coord_transform(
     3) undo Stage-1 crop by adding crop bbox offsets
     4) convert voxel (orig) to world mm (xyz)
     """
-    z_cf = int(round(_to_float(rec.get(f"{source_prefix}_coord_z", 0))))
-    y_cf = int(round(_to_float(rec.get(f"{source_prefix}_coord_y", 0))))
-    x_cf = int(round(_to_float(rec.get(f"{source_prefix}_coord_x", 0))))
+    z_cf = int(round(_get_source_axis_value(rec, source_prefix, "z")))
+    y_cf = int(round(_get_source_axis_value(rec, source_prefix, "y")))
+    x_cf = int(round(_get_source_axis_value(rec, source_prefix, "x")))
 
     # Step-1 already done outside (we are in cropped+flip space).
     # Step-2 undo flip Y (axis=1).

@@ -256,6 +256,14 @@ def _to_float(v, default=0.0):
         return float(default)
 
 
+def _get_source_axis_value(rec: dict, source_prefix: str, axis: str) -> float:
+    direct_key = f"{source_prefix}_{axis}"
+    coord_key = f"{source_prefix}_coord_{axis}"
+    if direct_key in rec:
+        return _to_float(rec.get(direct_key, 0))
+    return _to_float(rec.get(coord_key, 0))
+
+
 def _write_coord_transform(
     rec: dict,
     source_prefix: str,
@@ -266,9 +274,9 @@ def _write_coord_transform(
     origin_xyz,
     direction_flat_xyz,
 ):
-    z_cf = int(round(_to_float(rec.get(f"{source_prefix}_coord_z", 0))))
-    y_cf = int(round(_to_float(rec.get(f"{source_prefix}_coord_y", 0))))
-    x_cf = int(round(_to_float(rec.get(f"{source_prefix}_coord_x", 0))))
+    z_cf = int(round(_get_source_axis_value(rec, source_prefix, "z")))
+    y_cf = int(round(_get_source_axis_value(rec, source_prefix, "y")))
+    x_cf = int(round(_get_source_axis_value(rec, source_prefix, "x")))
 
     y_crop = int((crop_shape_zyx[1] - 1) - y_cf)
     z_crop = z_cf
